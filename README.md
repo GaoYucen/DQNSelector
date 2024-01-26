@@ -1,16 +1,31 @@
-# DQNSelector
+Method
 
-- Environment:
-  - Python 3.8
+- DegGreedy: sort based on degree
+- Cov: sort by one-step coverage capability
+- FastSelector: heuristic 
+- KTVoting: heuristic
+- PIANO: https://github.com/lihuixidian/PIANO
+- CELF: based on marginal effects
 
-- code:
-  - Methods
-    - CovEmbedGreedy.py: code for CovEmbedGreedy
-    - CovGreedy.py: code for CovGreedy
-    - DegGreedy.py: code for DegGreedy
-    - KTVoting.py: code for KTVoting
-    - NaiveFast.py: code for NaiveFast
-    - DQNSelector.py: code for DQNSelector
-  - Others
-    - effectivecoverage.py: used to calculate the effective coverage
-    - graphreader.py: read the graph  
+Dataset：
+
+- Edge: source, target, probability
+
+- nodes: id, coverage ability for subareas
+
+
+
+To run baselines:
+
+```
+cd code
+python run.py
+```
+
+To run DQNSelector:
+
+```
+cd code
+python DQNSelector.py
+```
+
