@@ -3,11 +3,14 @@ import time
 import math
 import numpy as np
 import networkx as nx
-from EffectiveCoverage_1 import read_from_txt, effective_coverage, probeffectivecoverage
+from effectivecoverage import effective_cov, read_graph
+
+from config import get_config
+params, _ = get_config()
 
 n_subarea = 100
-n_users = 5000
-n_seed_list = [1000]
+n_users = params.user_no
+n_seed_list = [params.seed_no]
 n_samplefile = 10
 input_file_path = r'../dataset/data_1'
 output_result_file_prefix = '../Result/Result_KTVoting/Result_KTVoting_5000'
@@ -168,9 +171,9 @@ def resultKTVoting(n_subarea, n_users, n_samplefile,
     writefile_runtime.write(first_line)
     g = dict()
     g_quality = dict()
-    sample_list = [1]
+    sample_list = [params.sample_file_no]
     for i in sample_list:
-        G = nx.Graph()
+
         
         nodefilename = input_file_path+'/input_node_' + str(n_users) + '_' + str(i) + '.txt'
         edgefilename = input_file_path+'/input_edge_' + str(n_users) + '_' + str(i) + '.txt'
@@ -179,17 +182,21 @@ def resultKTVoting(n_subarea, n_users, n_samplefile,
         stdECresult_line = 'Input '+str(i)
         runtimeresult_line = 'Input '+str(i)
         
-        g.clear()
-        g_quality.clear()
-        g, g_quality = read_from_txt(nodefilename, edgefilename, n_subarea)
-        G = readGraph(G, nodefilename, edgefilename, n_subarea)
+        # g.clear()
+        # g_quality.clear()
+        # g, g_quality = read_from_txt(nodefilename, edgefilename, n_subarea)
+
         for j in range(0, n):
+            G = nx.DiGraph()
+            G = readGraph(G, nodefilename, edgefilename, n_subarea)
             n_seed = n_seed_list[j]
             start = time.process_time()
             S = KTVoting2(n_seed,n_subarea, 0.9, 4, G)
             end = time.process_time()
             t = end - start
-            EC, stdEC, allEC = probeffectivecoverage(g, g_quality, S, n_subarea)
+            # EC, stdEC, allEC = probeffectivecoverage(g, g_quality, S, n_subarea)
+            nx_G = read_graph(nodefilename, edgefilename, n_subarea)
+            EC, stdEC = effective_cov(nx_G, S, n_subarea)
             ECresult_line += ('\t'+str(format(EC, '.4f')))
             stdECresult_line += ('\t'+str(format(stdEC, '.4f')))
             runtimeresult_line += ('\t'+str(format(t,'.4f')))
@@ -208,4 +215,4 @@ def resultKTVoting(n_subarea, n_users, n_samplefile,
     writefile_runtime.close()
 
     
-resultKTVoting(n_subarea, n_users, n_samplefile,input_file_path, output_result_file_prefix)
+# resultKTVoting(n_subarea, n_users, n_samplefile,input_file_path, output_result_file_prefix)

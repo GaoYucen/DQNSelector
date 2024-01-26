@@ -3,13 +3,14 @@ import random
 import networkx as nx
 import time
 import numpy as np
-from EffectiveCoverage_1 import read_from_txt, effective_coverage,probeffectivecoverage,IC
-from effectivecoverage import effective_cov
-from graphreader import read_graph
+from effectivecoverage import effective_cov, read_graph
+
+from config import get_config
+params, _ = get_config()
 
 n_subarea = 100
-n_users = 3000
-n_seed_list = [500]
+n_users = params.user_no
+n_seed_list = [params.seed_no]
 n_samplefile = 10
 input_file_path = r'../dataset/data_1'
 output_result_file_prefix = '../Result/Result_CovGreedy/Result_CovGreedy_sample1allEC_3000'
@@ -35,18 +36,17 @@ def readGraph(G,nodefilename,edgefilename, n_subarea):
         newedge = edgefile.readline()
     return G
 
-
 def select_seed_covgreedy(G, seed_num, n_subarea):
     S = set()
     DegDict = {}    #key 值为deg value具有该deg的candidate
     Deglist = list()
-    for cc in set(G.node):
+    for cc in set(G.nodes):
         deg = 0
         for jj in range(0,n_subarea):
-            degj = 1
+            degj = 0
             if not not set(nx.neighbors(G, cc)):
                 for ne in set(nx.neighbors(G, cc)):
-                    degj = degj *(1-G.node[ne]['weight'][jj]*G[cc][ne]['weight'] )
+                    degj = degj + G.nodes[ne]['weight'][jj]*G[cc][ne]['weight']
             deg = deg+degj
         if deg in DegDict.keys():
             DegDict[deg].append(cc)
@@ -54,7 +54,7 @@ def select_seed_covgreedy(G, seed_num, n_subarea):
             DegDict[deg] = list()
             DegDict[deg].append(cc)
             Deglist.append(deg)
-    Deglist.sort(reverse=False)
+    Deglist.sort(reverse=True)
     DegListIndex = 0
     while S.__len__()<seed_num:
         if DegDict[Deglist[DegListIndex]].__len__() != 0:
@@ -80,7 +80,7 @@ def resultCovGreedy(n_subarea, n_users, n_samplefile,
     writefile_EC.write(first_line)
     writefile_stdEC.write(first_line)
     writefile_runtime.write(first_line)
-    sample_file_list = [3]
+    sample_file_list = [params.sample_file_no]
     for i in sample_file_list:
         
         nodefilename = input_file_path+'/input_node_' + str(n_users) + '_' + str(i) + '.txt'
@@ -92,7 +92,7 @@ def resultCovGreedy(n_subarea, n_users, n_samplefile,
         
         for j in range(0, n):
             G = nx.DiGraph()
-            g, g_quality = read_from_txt(nodefilename, edgefilename, n_subarea)
+            # g, g_quality = read_from_txt(nodefilename, edgefilename, n_subarea)
             G = readGraph(G, nodefilename, edgefilename, n_subarea)
             n_seed = n_seed_list[j]
             start = time.process_time()
@@ -119,4 +119,4 @@ def resultCovGreedy(n_subarea, n_users, n_samplefile,
     writefile_runtime.close()
     
 
-resultCovGreedy(n_subarea, n_users, n_samplefile,input_file_path, output_result_file_prefix)
+# resultCovGreedy(n_subarea, n_users, n_samplefile, input_file_path, output_result_file_prefix)

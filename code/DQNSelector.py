@@ -11,6 +11,9 @@ import tensorflow.compat.v1 as tf
 
 tf.disable_v2_behavior()
 
+from config import get_config
+params, _ = get_config()
+
 
 # %% md
 
@@ -182,9 +185,13 @@ def directed_embedding_learning_mse_balanced_2(nxG, embedding_dim=32, lr=0.01, M
             for u in neg_samples:
                 samples.append((node, u, 0.0))
 
+        print('samples: ', len(samples))
+
     for l in range(0, train_iter_times):
         random.shuffle(samples)
-        print('Train learning: %d/%d' % (l, train_iter_times))
+        loss = []
+        tmp_value_list = []
+        p_list = []
         for i in range(0, len(samples)):
             v = samples[i][0]
             u = samples[i][1]
@@ -194,6 +201,10 @@ def directed_embedding_learning_mse_balanced_2(nxG, embedding_dim=32, lr=0.01, M
             influenced_embedding_dict[u] = influenced_embedding_dict[u] - 2 * lr * (tmp_val - p) * seed_embedding_dict[
                 v]
             seed_embedding_dict[v] = tmp
+            loss.append((tmp_val - p) ** 2)
+            tmp_value_list.append(tmp_val)
+            p_list.append(p)
+        print('Train learning: %d/%d, loss: %d, tmp_val: %d, p: %d' % (l, train_iter_times, np.mean(loss), np.mean(tmp_value_list), np.mean(p_list)))
     return seed_embedding_dict, influenced_embedding_dict
 
 
@@ -207,7 +218,7 @@ def coverage_step_embedding(Graph, cov_step, seed, influence):
     all_nodes = list(Graph.nodes())
 
     for node in all_nodes:
-        n_dim = len(np.array(Graph.node[node]['weight']))
+        n_dim = len(np.array(Graph.nodes[node]['weight']))
         step_cov_embedding[node] = np.zeros(n_dim)
 
     for node in all_nodes:
@@ -215,7 +226,7 @@ def coverage_step_embedding(Graph, cov_step, seed, influence):
         for i in range(0, cov_step):
             step_cov_embedding_chain2 = []
             for nbr in step_cov_embedding_chain1:
-                step_cov_embedding[node] += np.dot(seed[node],influence[nbr].reshape(-1,1))*Graph.node[nbr]['weight']
+                step_cov_embedding[node] += np.dot(seed[node],influence[nbr].reshape(-1,1))*Graph.nodes[nbr]['weight']
                 step_cov_embedding_chain2 += Graph.neighbors(nbr)
                 step_cov_embedding_chain2 = list(set(step_cov_embedding_chain2))
             step_cov_embedding_chain1 = step_cov_embedding_chain2
@@ -299,7 +310,7 @@ class DeepQNetwork:
             learning_rate=0.001,
             reward_decay=0.9,
             e_greedy=0.9,
-            replace_target_iter=50,
+            replace_target_iter=10,
             memory_size=500,
             batch_size=32,
             e_greedy_increment=None,
@@ -629,20 +640,21 @@ def test(nx_G, node2vec_embedding, step_cov_embedding, RL, k,
 # %%
 
 n_subarea = 100
-n_users = 5000
+n_users = params.user_no
 n_samplefile = 10
 input_file_path = r'../dataset/data_1'
-input_index = 1
-output_result_file_prefix = '../Result/Result_DQNSelector_n5000_trainingseed500_trainingsample4/Result_DQNSelector_5000'
+input_index = params.sample_file_no
+output_result_file_prefix = '../Result/Result_DQNSelector/Result_DQNSelector_sample1allEC_3000'
 
 # %%
 
 # RL Agent (Deep Q Network Setting)
+embed_dim = 128
 batchsize = 128
 n_l1 = 50
 n_l2 = 20
-episode = 200
-seed_number_training = 500
+episode = 50
+seed_number_training = params.seed_no
 n = 10
 
 # %%
@@ -651,34 +663,34 @@ nodefilename = input_file_path + '/input_node_' + str(n_users) + '_' + str(input
 edgefilename = input_file_path + '/input_edge_' + str(n_users) + '_' + str(input_index) + '.txt'
 nx_G = read_graph(nodefilename, edgefilename, n_subarea)
 
-# %%
-
-# seed_embedding_dict_mse_balanced, influenced_embedding_dict_mse_balanced = directed_embedding_learning_mse_balanced_2(
-#     nx_G, embedding_dim=128,
-#     lr=0.01, MC_times=10, MC_iter_times=5, train_iter_times=5)
-# step_cov_embedding = coverage_step(nx_G, cov_step=4)
-# step_cov_embedding = coverage_step_embedding(nx_G, cov_step=4, seed=seed_embedding_dict_mse_balanced, influence=influenced_embedding_dict_mse_balanced)
-
-# %%
-
+# # %%
+#
+seed_embedding_dict_mse_balanced, influenced_embedding_dict_mse_balanced = directed_embedding_learning_mse_balanced_2(
+    nx_G, embedding_dim=embed_dim,
+    lr=0.01, MC_times=30, MC_iter_times=1, train_iter_times=1)
+# # step_cov_embedding = coverage_step(nx_G, cov_step=4)
+# step_cov_embedding = coverage_step_embedding(nx_G, cov_step=2, seed=seed_embedding_dict_mse_balanced, influence=influenced_embedding_dict_mse_balanced)
+#
+# # %%
+#
 # save embedding
-# np.save('../DQNSelector_checkpoints_5000_seed500_sample1/seed_embedding_dict_mse_balanced',
-#         seed_embedding_dict_mse_balanced)
-# np.save('../DQNSelector_checkpoints_5000_seed500_sample1/influenced_embedding_dict_mse_balanced',
-#         influenced_embedding_dict_mse_balanced)
-# np.save('../DQNSelector_checkpoints_5000_seed500_sample1/step_cov_embedding', step_cov_embedding)
+np.save('../param/seed_embedding_dict_mse_balanced_'+str(n_users)+'_'+str(input_index)+'.npy',
+        seed_embedding_dict_mse_balanced)
+np.save('../param/influenced_embedding_dict_mse_balanced'+str(n_users)+'_'+str(input_index)+'.npy',
+        influenced_embedding_dict_mse_balanced)
+# np.save('../param/step_cov_embedding_'+str(n_users)+'_'+str(input_index)+'.npy', step_cov_embedding)
 
 # %%
 
 seed_embedding_dict_mse_balanced = np.load(
-    '../DQNSelector_checkpoints_5000_seed500_sample1/seed_embedding_dict_mse_balanced.npy',
+    '../param/seed_embedding_dict_mse_balanced_'+str(n_users)+'_'+str(input_index)+'.npy',
     allow_pickle=True).item()
-step_cov_embedding = np.load('../DQNSelector_checkpoints_5000_seed500_sample1/step_cov_embedding.npy',
+step_cov_embedding = np.load('../param/step_cov_embedding_'+str(n_users)+'_'+str(input_index)+'.npy',
                              allow_pickle=True).item()
 
 # %%
 
-RL = DeepQNetwork(n_actions=1, n_features=(n_subarea + 128),
+RL = DeepQNetwork(n_actions=1, n_features=(n_subarea + embed_dim),
                   n_l1=n_l1,
                   n_l2=n_l2,
                   batch_size=batchsize)
@@ -687,40 +699,26 @@ RL = DeepQNetwork(n_actions=1, n_features=(n_subarea + 128),
 # %%
 
 RL = train(RL, nx_G, seed_embedding_dict_mse_balanced, step_cov_embedding,
-           '../DQNSelector_checkpoints_5000_seed500_sample1/',
+           '../param/',
            batchsize=batchsize, n_l1=n_l1, n_l2=n_l2, episode=episode, seed_number_training=seed_number_training, n=n,
-           word2vec_embedding_dim=128, n_subarea=n_subarea)
+           word2vec_embedding_dim=embed_dim, n_subarea=n_subarea)
 
 # %%
 
-RL.save_model('../test.ckpt')
-#
+RL.save_model('../param/5000_'+str(input_index)+'.ckpt')
+
 # # %% md
 #
 # ##### Single sample testing
 #
 # # %%
 #
-# RL = DeepQNetwork(n_actions=1, n_features=(n_subarea + 128),
-#                   n_l1=n_l1,
-#                   n_l2=n_l2,
-#                   batch_size=batchsize)
-#
+# RL.load_model('../param/5000_3.ckpt')
+# #
 # # %%
 #
-# seed_embedding_dict_mse_balanced = np.load(
-#     '../DQNSelector_checkpoints_5000_seed500_sample4/seed_embedding_dict_mse_balanced.npy',
-#     allow_pickle=True).item()
-# step_cov_embedding = np.load('../DQNSelector_checkpoints_5000_seed500_sample4/step_cov_embedding.npy',
-#                              allow_pickle=True).item()
+# n_seed_list = [params.seed_no]
 #
-# # %%
-#
-# RL.load_model('../DQNSelector_checkpoints_5000_seed500_sample4/episode_2_ec_645.0761.ckpt')
-#
-# # %%
-#
-# n_seed_list = [1000]
 # writefile_EC = open(output_result_file_prefix + '_EC.txt', 'w')
 # writefile_stdEC = open(output_result_file_prefix + '_stdEC.txt', 'w')
 # writefile_runtime = open(output_result_file_prefix + '_runtime.txt', 'w')
@@ -766,94 +764,4 @@ RL.save_model('../test.ckpt')
 # writefile_EC.close()
 # writefile_stdEC.close()
 # writefile_runtime.close()
-#
-# #%%
-# import numpy as np
-#
-#
-#
-
-#%%
-import numpy as np
-import networkx as nx
-from gensim.models import Word2Vec
-import random
-import time
-
-seed_embedding_dict_mse_balanced = np.load(
-    'DQNSelector_checkpoints_5000_seed500_sample1/seed_embedding_dict_mse_balanced.npy',
-    allow_pickle=True).item()
-influenced_embedding_dict_mse_balanced = np.load(
-    'DQNSelector_checkpoints_5000_seed500_sample1/influenced_embedding_dict_mse_balanced.npy',
-    allow_pickle=True).item()
-
-n_subarea = 100
-n_users = 5000
-input_file_path = r'dataset/data_1'
-input_index = 1
-
-def read_graph(node_file_name, edge_file_name, n_subarea):
-    G = nx.DiGraph()
-
-    nodefile = open(node_file_name)
-    newnode = nodefile.readline()
-    while newnode:
-        nodeId = int(newnode.split('\t')[0])
-        nodeWeight = list()
-        for i in range(0, n_subarea):
-            nodeWeight.append(float(newnode.split('\t')[i + 1]))
-        G.add_node(nodeId, weight=nodeWeight)
-        newnode = nodefile.readline()
-    nodefile.close()
-
-    edgefile = open(edge_file_name)
-    newedge = edgefile.readline()
-    while newedge:
-        node1 = int(newedge.split('\t')[0])
-        node2 = int(newedge.split('\t')[1])
-        edgeWeight = float(newedge.split('\t')[2])
-        G.add_weighted_edges_from([(node1, node2, edgeWeight)])
-        newedge = edgefile.readline()
-    edgefile.close()
-
-    return G
-
-def coverage_step_embedding(Graph, cov_step, seed, influence):
-    step_cov_embedding = {}
-    all_nodes = list(Graph.nodes())
-
-    for node in all_nodes:
-        n_dim = len(np.array(Graph.node[node]['weight']))
-        step_cov_embedding[node] = np.zeros(n_dim)
-
-    for node in all_nodes:
-        step_cov_embedding_chain1 = Graph.neighbors(node)
-        for i in range(0, cov_step):
-            step_cov_embedding_chain2 = []
-            for nbr in step_cov_embedding_chain1:
-                step_cov_embedding[node] += np.dot(seed[node],influence[nbr].reshape(-1,1))*Graph.node[nbr]['weight']
-                step_cov_embedding_chain2 += Graph.neighbors(nbr)
-                step_cov_embedding_chain2 = list(set(step_cov_embedding_chain2))
-            step_cov_embedding_chain1 = step_cov_embedding_chain2
-
-    maxval = np.zeros(n_dim)
-    for i in range(0, n_dim):
-        for node in step_cov_embedding.keys():
-            maxval[i] = max(step_cov_embedding[node][i], maxval[i])
-
-    for node in step_cov_embedding.keys():
-        step_cov_embedding[node] = np.true_divide(step_cov_embedding[node], maxval)
-    return step_cov_embedding
-
-nodefilename = input_file_path + '/input_node_' + str(n_users) + '_' + str(input_index) + '.txt'
-edgefilename = input_file_path + '/input_edge_' + str(n_users) + '_' + str(input_index) + '.txt'
-nx_G = read_graph(nodefilename, edgefilename, n_subarea)
-
-step_cov_embedding = coverage_step_embedding(nx_G, cov_step=4, seed=seed_embedding_dict_mse_balanced, influence=influenced_embedding_dict_mse_balanced)
-
-print(step_cov_embedding)
-
-#%%
-np.save('DQNSelector_checkpoints_5000_seed500_sample1/step_cov_embedding', step_cov_embedding)
-
 
