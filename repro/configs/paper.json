@@ -1,0 +1,31 @@
+{
+  "source": "SIGIR 2024 paper",
+  "datasets": ["Gowalla", "Brightkite"],
+  "graph_sizes": [3000, 5000],
+  "worker_pool_size": 300,
+  "target_subareas": 100,
+  "grid_cell_km": [5, 5],
+  "seed_budgets": [50, 60, 70, 80, 90, 100],
+  "edge_probability_range": [0.1, 0.5],
+  "social_embedding_dim": 128,
+  "mc_simulations": 100,
+  "graph_iterations": 30,
+  "dqn_episodes": 100,
+  "reported_training_seed_budget": 50,
+  "rainbow_components": [
+    "double_dqn",
+    "dueling_dqn",
+    "prioritized_replay",
+    "multi_step",
+    "distributional_rl",
+    "noisy_net"
+  ],
+  "under_specified": [
+    "raw check-in-count to demand d_i mapping",
+    "random seeds for user sampling",
+    "random seeds for target subarea sampling",
+    "worker pool sampling",
+    "complete generated instance collection",
+    "exact direction handling for source social relationships"
+  ]
+}
