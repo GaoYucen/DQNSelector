@@ -102,7 +102,7 @@ def _transition_loss(
     tr: Transition,
     encoded_online: torch.Tensor,
     encoded_target: torch.Tensor,
-    gamma_n: float,
+    gamma: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = encoded_online.device
     state_mask = _to_mask(tr.state_mask, device)
@@ -139,7 +139,7 @@ def _transition_loss(
             next_dist.unsqueeze(0),
             torch.tensor([tr.reward], dtype=torch.float32, device=device),
             torch.tensor([float(tr.done)], dtype=torch.float32, device=device),
-            gamma_n,
+            gamma ** int(tr.n_steps),
             online.qnet.support,
         )[0]
     loss = -(projected * pred.log()).sum()
@@ -164,13 +164,7 @@ def train_rainbow_selector(
     random_seed: int = 0,
     device: str | torch.device = "cpu",
 ) -> tuple[RainbowSelector, TrainStats]:
-    """Correctness-first Rainbow training loop for one graph instance.
-
-    `reward_fn(S, v)` must return Eq. (15)'s marginal reward. For the paper-scale
-    experiment this can call the ECM evaluator; synthetic/unit experiments can use
-    a deterministic oracle. The implementation intentionally favors transparent
-    state masks over highly optimized batching.
-    """
+    """Correctness-first Rainbow training loop for one graph instance."""
     if seed_budget <= 0:
         raise ValueError("seed_budget must be positive")
     torch.manual_seed(random_seed)
@@ -184,7 +178,6 @@ def train_rainbow_selector(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     replay = PrioritizedReplay(replay_capacity, random_seed=random_seed)
     nstep = NStepAccumulator(n_step=n_step, gamma=gamma)
-    gamma_n = gamma**n_step
     episode_returns: list[float] = []
     losses: list[float] = []
     selected_sets: list[list[int]] = []
@@ -211,7 +204,7 @@ def train_rainbow_selector(
             done = (t + 1 >= seed_budget) or (
                 int((model.worker_pool_mask.detach().cpu().numpy() & ~next_mask).sum()) == 0
             )
-            raw = Transition(mask.copy(), action, reward, next_mask.copy(), done)
+            raw = Transition(mask.copy(), action, reward, next_mask.copy(), done, n_steps=1)
             for aggregated in nstep.push(raw):
                 replay.add(aggregated)
             selected.add(action)
@@ -229,7 +222,7 @@ def train_rainbow_selector(
                 td_errors: list[float] = []
                 for tr, weight in zip(batch, importance.tolist()):
                     loss_i, td_i = _transition_loss(
-                        model, target, tr, encoded_online, encoded_target, gamma_n
+                        model, target, tr, encoded_online, encoded_target, gamma
                     )
                     per_losses.append(loss_i * float(weight))
                     td_errors.append(float(td_i.detach().cpu()))
