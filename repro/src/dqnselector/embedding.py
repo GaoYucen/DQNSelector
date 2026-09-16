@@ -27,12 +27,11 @@ def build_balanced_influence_pairs(
     graph_iterations: int = 1,
     random_seed: int = 0,
 ) -> InfluencePairDataset:
-    """Construct positive/negative pairs for Eqs. (7)--(9) / Algorithm 1.
+    """Build a dense balanced pair set for diagnostics/alternative fitting.
 
-    A positive target is any non-seed node observed with non-zero estimated
-    activation probability. For each seed and graph iteration we sample the same
-    number of zero-probability targets with replacement, matching Algorithm 1's
-    balanced-pair description.
+    This utility follows the paper's positive/negative definition but stores all
+    positive pairs plus an equal number of negative pairs. The more literal
+    Algorithm-1 update path is `fit_social_influence_embedding_algorithm1` below.
     """
     if graph_iterations <= 0:
         raise ValueError("graph_iterations must be positive")
@@ -43,7 +42,7 @@ def build_balanced_influence_pairs(
     target_idx: list[int] = []
     probs_out: list[float] = []
 
-    for gi in range(graph_iterations):
+    for _ in range(graph_iterations):
         order = list(nodes)
         rng.shuffle(order)
         for seed in order:
@@ -77,6 +76,79 @@ def build_balanced_influence_pairs(
     )
 
 
+def fit_social_influence_embedding_algorithm1(
+    graph: nx.DiGraph,
+    dim: int = 128,
+    mc_times: int = 100,
+    graph_iterations: int = 30,
+    learning_rate: float = 0.01,
+    random_seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, list[float]]:
+    """Literal implementation of the published Algorithm 1 / Eqs. (8)--(9).
+
+    For every graph iteration, nodes are shuffled. For each seed v, MC estimates
+    p_u({v}); an equal-size negative pool is sampled with replacement; then one
+    target u is uniformly drawn from the positive+negative pool and one SGD update
+    is performed. The returned trace is the mean squared error of those performed
+    updates in each graph iteration.
+
+    The paper's pseudocode performs one randomly selected pair update per seed,
+    which is materially different from iterating over every positive/negative pair.
+    Both versions are kept so this distinction is testable rather than hidden.
+    """
+    if dim <= 0 or mc_times <= 0 or graph_iterations <= 0:
+        raise ValueError("dim, mc_times and graph_iterations must be positive")
+    nodes = list(graph.nodes())
+    if nodes != list(range(len(nodes))):
+        raise ValueError("Algorithm-1 implementation currently requires dense node ids 0..n-1")
+    rng = np.random.default_rng(random_seed)
+    bound = 1.0 / float(dim)
+    s = rng.uniform(-bound, bound, size=(len(nodes), dim)).astype(np.float64)
+    t = rng.uniform(-bound, bound, size=(len(nodes), dim)).astype(np.float64)
+    history: list[float] = []
+
+    for _ in range(graph_iterations):
+        order = np.asarray(nodes, dtype=np.int64)
+        rng.shuffle(order)
+        losses: list[float] = []
+        for seed_np in order:
+            seed = int(seed_np)
+            probs = mc_activation_probabilities(
+                graph,
+                [seed],
+                mc_times=mc_times,
+                random_seed=int(rng.integers(0, 2**31 - 1)),
+            )
+            positives = [u for u in nodes if u != seed and probs.get(u, 0.0) > 0.0]
+            if positives:
+                negatives = [u for u in nodes if u != seed and probs.get(u, 0.0) == 0.0]
+                if negatives:
+                    neg_sample = rng.choice(negatives, size=len(positives), replace=True).tolist()
+                else:
+                    neg_sample = []
+                sample_pool = positives + [int(x) for x in neg_sample]
+                target = int(sample_pool[int(rng.integers(0, len(sample_pool)))])
+                label = float(probs[target]) if target in positives else 0.0
+            else:
+                negatives = [u for u in nodes if u != seed]
+                if not negatives:
+                    continue
+                target = int(negatives[int(rng.integers(0, len(negatives)))])
+                label = 0.0
+
+            old_s = s[seed].copy()
+            old_t = t[target].copy()
+            pred = float(old_s @ old_t)
+            error = pred - label
+            # Paper Eqs. (8)--(9) omit the constant factor 2 from differentiating
+            # squared error, so we follow the equations literally here.
+            s[seed] = old_s - learning_rate * error * old_t
+            t[target] = old_t - learning_rate * error * old_s
+            losses.append(error * error)
+        history.append(float(np.mean(losses)) if losses else 0.0)
+    return s.astype(np.float32), t.astype(np.float32), history
+
+
 class SocialInfluenceEmbedding(nn.Module):
     """Two directed embeddings s_v and t_u whose dot product predicts p_u({v})."""
 
@@ -103,7 +175,7 @@ def fit_social_influence_embedding(
     random_seed: int = 0,
     device: str | torch.device = "cpu",
 ) -> tuple[np.ndarray, np.ndarray, list[float]]:
-    """Fit Eq. (7) with mini-batch SGD and return s, t, loss history."""
+    """Fit Eq. (7) over an explicit pair dataset with mini-batch SGD."""
     if len(pairs) == 0:
         raise ValueError("no influence pairs were generated")
     torch.manual_seed(random_seed)
