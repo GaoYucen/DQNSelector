@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 import gzip
 import json
 from pathlib import Path
-from typing import Iterable
 
 import networkx as nx
 import numpy as np
@@ -42,7 +41,6 @@ def _open_text(path: str | Path):
 def _grid_cell(lon: float, lat: float, cfg: ReconstructionConfig) -> tuple[int, int] | None:
     if not (cfg.lon_min <= lon <= cfg.lon_max and cfg.lat_min <= lat <= cfg.lat_max):
         return None
-    # Clamp points exactly on the maximum boundary into the last cell.
     x = min(cfg.lon_cells - 1, int((lon - cfg.lon_min) / (cfg.lon_max - cfg.lon_min) * cfg.lon_cells))
     y = min(cfg.lat_cells - 1, int((lat - cfg.lat_min) / (cfg.lat_max - cfg.lat_min) * cfg.lat_cells))
     return x, y
@@ -71,9 +69,7 @@ def _read_edge_nodes(edge_path: str | Path) -> tuple[list[tuple[int, int]], set[
     return edges, nodes
 
 
-def _scan_checkins(
-    checkin_path: str | Path, cfg: ReconstructionConfig
-) -> tuple[set[int], np.ndarray]:
+def _scan_checkins(checkin_path: str | Path, cfg: ReconstructionConfig) -> tuple[set[int], np.ndarray]:
     users: set[int] = set()
     counts = np.zeros((cfg.lon_cells, cfg.lat_cells), dtype=np.int64)
     with _open_text(checkin_path) as f:
@@ -96,9 +92,7 @@ def _scan_checkins(
     return users, counts
 
 
-def _collect_user_locations(
-    checkin_path: str | Path, selected_users: set[int]
-) -> dict[int, list[tuple[float, float]]]:
+def _collect_user_locations(checkin_path: str | Path, selected_users: set[int]) -> dict[int, list[tuple[float, float]]]:
     locs = {u: [] for u in selected_users}
     with _open_text(checkin_path) as f:
         for line in f:
@@ -128,7 +122,7 @@ def _demand_from_counts(counts: np.ndarray, cfg: ReconstructionConfig) -> np.nda
         return np.maximum(counts, 1.0) * cfg.demand_scale
     if cfg.demand_mode == "max_normalized":
         denom = max(float(counts.max()), 1.0)
-        return (1.0 + counts / denom * cfg.demand_scale)
+        return 1.0 + counts / denom * cfg.demand_scale
     if cfg.demand_mode == "sqrt_count":
         return np.maximum(np.sqrt(np.maximum(counts, 1.0)) * cfg.demand_scale, 1e-12)
     raise ValueError(f"unknown demand_mode={cfg.demand_mode!r}")
@@ -139,13 +133,7 @@ def reconstruct_instance(
     checkin_path: str | Path,
     cfg: ReconstructionConfig,
 ) -> tuple[ECMInstance, dict]:
-    """Build a fully manifested reconstruction from SNAP-format data.
-
-    This function follows every experiment detail that the paper explicitly gives.
-    Choices the paper does *not* uniquely specify (notably the demand transform,
-    random seed and undirected-to-directed edge handling) are exposed in `cfg` and
-    written to the manifest rather than hidden.
-    """
+    """Build a fully manifested reconstruction from SNAP-format data."""
     rng = np.random.default_rng(cfg.random_seed)
     source_edges, edge_nodes = _read_edge_nodes(edge_path)
     checkin_users, grid_counts = _scan_checkins(checkin_path, cfg)
@@ -172,17 +160,14 @@ def reconstruct_instance(
     min_dist = np.empty((n, h), dtype=np.float64)
     for original, new in original_to_new.items():
         user_xy = np.asarray(locs[original], dtype=np.float64)
-        # Paper Eq. (24) states Euclidean distance between user positions and task
-        # position; we therefore use raw (lon,lat) coordinate pairs literally.
         diff = user_xy[:, None, :] - centers[None, :, :]
         dist = np.sqrt((diff * diff).sum(axis=2))
         min_dist[new] = dist.min(axis=0)
     max_dist = float(min_dist.max())
     if max_dist <= 0:
         raise RuntimeError("degenerate distance normalization")
-    p = 1.0 - min_dist / max_dist
-    p = np.clip(p, 0.0, 1.0)
-    q = p.copy()  # Eq. (23) sets p_v^i = q_v^i to the same normalized distance score.
+    p = np.clip(1.0 - min_dist / max_dist, 0.0, 1.0)
+    q = p.copy()
 
     graph = nx.DiGraph()
     graph.add_nodes_from(range(n))
@@ -211,18 +196,14 @@ def reconstruct_instance(
         "worker_pool": sorted(worker_pool),
         "notes": [
             "Demand transform is explicitly configured because the paper only states that d_i is based on check-in count.",
-            "Source SNAP friendship edges are treated as bidirectional by default because the source datasets are undirected; this choice is configurable.",
+            "Source SNAP friendship edges are treated as bidirectional by default because the released SNAP friendship networks are undirected; this choice is configurable.",
             "Euclidean distance is applied directly to (longitude, latitude) coordinates following the literal wording of Eq. (24).",
         ],
     }
     return instance, manifest
 
 
-def save_reconstruction(
-    instance: ECMInstance,
-    manifest: dict,
-    output_dir: str | Path,
-) -> None:
+def save_reconstruction(instance: ECMInstance, manifest: dict, output_dir: str | Path) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     edges = np.asarray(
@@ -240,3 +221,29 @@ def save_reconstruction(
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def load_reconstruction(output_dir: str | Path) -> tuple[ECMInstance, dict]:
+    output_dir = Path(output_dir)
+    data = np.load(output_dir / "instance.npz")
+    participation = data["participation"]
+    quality = data["quality"]
+    demand = data["demand"]
+    edges = data["edges"]
+    worker_pool = set(int(x) for x in data["worker_pool"].tolist())
+    graph = nx.DiGraph()
+    graph.add_nodes_from(range(participation.shape[0]))
+    for row in edges:
+        if row.size < 3:
+            continue
+        graph.add_edge(int(row[0]), int(row[1]), weight=float(row[2]))
+    instance = ECMInstance(
+        graph=graph,
+        nodes=list(range(participation.shape[0])),
+        participation=participation,
+        quality=quality,
+        demand=demand,
+        worker_pool=worker_pool,
+    )
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    return instance, manifest
