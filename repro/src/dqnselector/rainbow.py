@@ -56,13 +56,7 @@ class NoisyLinear(nn.Module):
 
 
 class PairwiseDuelingC51(nn.Module):
-    """Distributional Q(s,a) for a variable candidate set.
-
-    The value stream depends only on the seed-set state. The advantage stream is
-    pair-conditioned on state and candidate node. Dueling centering is performed
-    across the *current candidate set*, allowing a variable number of candidate
-    workers while retaining the paper's node-representation-as-action design.
-    """
+    """Distributional Q(s,a) for a variable candidate set."""
 
     def __init__(
         self,
@@ -124,6 +118,7 @@ class Transition:
     reward: float
     next_state_mask: np.ndarray
     done: bool
+    n_steps: int = 1
 
 
 class NStepAccumulator:
@@ -139,11 +134,13 @@ class NStepAccumulator:
         reward = 0.0
         next_mask = first.next_state_mask
         done = False
+        steps = 0
         for i, tr in enumerate(self.buffer):
             reward += (self.gamma**i) * float(tr.reward)
             next_mask = tr.next_state_mask
             done = bool(tr.done)
-            if done or i + 1 >= self.n_step:
+            steps = i + 1
+            if done or steps >= self.n_step:
                 break
         return Transition(
             state_mask=first.state_mask.copy(),
@@ -151,6 +148,7 @@ class NStepAccumulator:
             reward=float(reward),
             next_state_mask=next_mask.copy(),
             done=done,
+            n_steps=steps,
         )
 
     def push(self, transition: Transition) -> list[Transition]:
