@@ -69,9 +69,11 @@ def _read_edge_nodes(edge_path: str | Path) -> tuple[list[tuple[int, int]], set[
     return edges, nodes
 
 
-def _scan_checkins(checkin_path: str | Path, cfg: ReconstructionConfig) -> tuple[set[int], np.ndarray]:
+def _scan_checkins(checkin_path: str | Path, cfg: ReconstructionConfig) -> tuple[set[int], np.ndarray, int]:
+    """Return users/check-ins inside the paper's stated rectangular sensing region."""
     users: set[int] = set()
     counts = np.zeros((cfg.lon_cells, cfg.lat_cells), dtype=np.int64)
+    region_records = 0
     with _open_text(checkin_path) as f:
         for line in f:
             if not line.strip() or line.startswith("#"):
@@ -85,14 +87,21 @@ def _scan_checkins(checkin_path: str | Path, cfg: ReconstructionConfig) -> tuple
                 lon = float(parts[3])
             except ValueError:
                 continue
-            users.add(user)
             cell = _grid_cell(lon, lat, cfg)
-            if cell is not None:
-                counts[cell] += 1
-    return users, counts
+            if cell is None:
+                continue
+            users.add(user)
+            counts[cell] += 1
+            region_records += 1
+    return users, counts, region_records
 
 
-def _collect_user_locations(checkin_path: str | Path, selected_users: set[int]) -> dict[int, list[tuple[float, float]]]:
+def _collect_user_locations(
+    checkin_path: str | Path,
+    selected_users: set[int],
+    cfg: ReconstructionConfig,
+) -> dict[int, list[tuple[float, float]]]:
+    """Collect only trajectories/check-ins inside the sensing rectangle."""
     locs = {u: [] for u in selected_users}
     with _open_text(checkin_path) as f:
         for line in f:
@@ -111,6 +120,8 @@ def _collect_user_locations(checkin_path: str | Path, selected_users: set[int]) 
                 lat = float(parts[2])
                 lon = float(parts[3])
             except ValueError:
+                continue
+            if _grid_cell(lon, lat, cfg) is None:
                 continue
             locs[user].append((lon, lat))
     return locs
@@ -133,18 +144,23 @@ def reconstruct_instance(
     checkin_path: str | Path,
     cfg: ReconstructionConfig,
 ) -> tuple[ECMInstance, dict]:
-    """Build a fully manifested reconstruction from SNAP-format data."""
+    """Build a fully manifested reconstruction from SNAP-format data.
+
+    The paper gives the rectangle boundaries together with Table 1's users,
+    records, and edge statistics. We therefore first restrict the source records
+    to that rectangle, then sample users and induce their social graph.
+    """
     rng = np.random.default_rng(cfg.random_seed)
     source_edges, edge_nodes = _read_edge_nodes(edge_path)
-    checkin_users, grid_counts = _scan_checkins(checkin_path, cfg)
-    eligible = np.asarray(sorted(edge_nodes & checkin_users), dtype=np.int64)
+    region_users, grid_counts, region_records = _scan_checkins(checkin_path, cfg)
+    eligible = np.asarray(sorted(edge_nodes & region_users), dtype=np.int64)
     if eligible.size < cfg.n_users:
-        raise ValueError(f"only {eligible.size} eligible users, need {cfg.n_users}")
+        raise ValueError(f"only {eligible.size} region-eligible users, need {cfg.n_users}")
     sampled_original = rng.choice(eligible, size=cfg.n_users, replace=False)
     sampled_set = set(int(x) for x in sampled_original.tolist())
-    locs = _collect_user_locations(checkin_path, sampled_set)
+    locs = _collect_user_locations(checkin_path, sampled_set, cfg)
     if any(len(locs[u]) == 0 for u in sampled_set):
-        raise RuntimeError("sampled user unexpectedly has no check-ins")
+        raise RuntimeError("sampled region user unexpectedly has no in-region check-ins")
 
     total_cells = cfg.lon_cells * cfg.lat_cells
     if cfg.n_target_subareas > total_cells:
@@ -186,6 +202,8 @@ def reconstruct_instance(
     instance = ECMInstance(graph, list(range(n)), p, q, demand, worker_pool)
     manifest = {
         "config": asdict(cfg),
+        "region_user_count_with_social_edge": int(eligible.size),
+        "region_checkin_records": int(region_records),
         "sampled_original_user_ids": sampled_original.tolist(),
         "target_cells_xy": cells,
         "target_centers_lon_lat": centers.tolist(),
@@ -195,6 +213,7 @@ def reconstruct_instance(
         "directed_edges_after_conversion": graph.number_of_edges(),
         "worker_pool": sorted(worker_pool),
         "notes": [
+            "Users and trajectories are restricted to the paper's stated sensing rectangle before sampling.",
             "Demand transform is explicitly configured because the paper only states that d_i is based on check-in count.",
             "Source SNAP friendship edges are treated as bidirectional by default because the released SNAP friendship networks are undirected; this choice is configurable.",
             "Euclidean distance is applied directly to (longitude, latitude) coordinates following the literal wording of Eq. (24).",
