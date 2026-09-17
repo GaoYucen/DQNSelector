@@ -12,7 +12,7 @@ from dqnselector.reconstruction import save_reconstruction
 from dqnselector.scientific import ScientificReconstructionConfig, reconstruct_scientific_instance
 
 
-MAIN_LOAD_FACTOR = 1.25
+MAIN_LOAD_FACTOR = 1.50
 
 
 def parse_args():
@@ -29,7 +29,7 @@ def parse_args():
         "--load-factor",
         type=float,
         default=MAIN_LOAD_FACTOR,
-        help="Scientific-v1 main setting is rho=1.25; sweep other regimes explicitly.",
+        help="Scientific-v1 main setting is rho=1.50; sweep other regimes explicitly.",
     )
     p.add_argument("--demand-activity-power", type=float, default=0.50)
     p.add_argument("--demand-floor-ratio", type=float, default=0.05)
