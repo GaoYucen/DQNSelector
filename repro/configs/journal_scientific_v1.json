@@ -37,14 +37,41 @@
     "legacy_ablation": "legacy-quality",
     "piic_range": 2
   },
+  "oracle": {
+    "monte_carlo_protocol": "fixed live-edge worlds for repeatable queries",
+    "canonical_ec_order": [
+      "estimate node activation probabilities across worlds",
+      "form expected subarea coverage",
+      "apply demand clipping once to expected coverage",
+      "average over subareas"
+    ],
+    "forbid_per_world_clipping_then_average": true,
+    "regression_gate_required_before_dqn_or_celf": true
+  },
+  "baselines": {
+    "compatibility": ["DegreeGreedy", "CoverageGreedy"],
+    "scientific_static": ["ObjCovGreedy"],
+    "objective_oracle": ["CELF"],
+    "learned": ["DQNSelector"],
+    "reference": ["Random"]
+  },
   "budgets": {
     "primary": [5, 10, 20, 30, 40, 50],
     "stress_test": [75, 100]
+  },
+  "training_baseline": {
+    "episodes": 100,
+    "train_budget": 50,
+    "social_embedding_dim": 128,
+    "social_embedding_mc": 100,
+    "graph_iterations": 30,
+    "rationale": "Match the conference training budget for the first scientifically calibrated baseline before changing the learning algorithm."
   },
   "evaluation": {
     "independent_live_edge_worlds": true,
     "recommended_mc_worlds": 300,
     "report_saturation_fraction": true,
-    "report_random_baseline_repeats": 20
+    "report_random_baseline_repeats": 20,
+    "separate_preprocessing_training_and_online_selection_time": true
   }
 }
