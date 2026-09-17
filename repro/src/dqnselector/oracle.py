@@ -17,26 +17,13 @@ class OracleStats:
 
 
 class LiveEdgeECOracle:
-    """Reusable fixed-world Monte-Carlo oracle for the paper-defined EC(S).
+    """Reusable fixed-world Monte-Carlo oracle for canonical and realized EC.
 
-    Under the Independent Cascade model, one Monte-Carlo realization can be
-    represented as a live-edge graph: each edge (u,v) is retained independently
-    with probability w(u,v), and the activated nodes are exactly those reachable
-    from S. By fixing a set of live-edge worlds once, all algorithms see the same
-    stochastic influence sample and repeated reward/CELF queries are deterministic.
-
-    Crucially, the ECM objective first estimates each node's activation probability
-    p_v(S) across Monte-Carlo worlds, then forms expected coverage
-
-        C_i(S) = sum_v p_v(S) * p_v^i * q_v^i,
-
-    and only then applies the demand cap min(C_i/d_i, 1).  Clipping separately in
-    each live-edge world and averaging afterwards would be a different objective
-    because clipping is nonlinear.  `score()` therefore derives fixed-world
-    activation probabilities first and applies the cap once to expected coverage.
-
-    The default precomputation is limited to the worker pool because only
-    worker-pool nodes can be selected as seeds.
+    ``score`` implements the paper-defined objective: average activation first,
+    then form expected coverage and apply the demand cap once. ``realized_score``
+    is a robustness metric that applies the cap inside each live-edge world and
+    averages the realized task fulfillment afterwards. The two are intentionally
+    kept separate because clipping is nonlinear.
     """
 
     def __init__(
@@ -67,6 +54,7 @@ class LiveEdgeECOracle:
         )
         self._reachability: list[list[np.ndarray]] = []
         self._score_cache: dict[frozenset[int], float] = {}
+        self._realized_score_cache: dict[frozenset[int], float] = {}
         self._activation_cache: dict[frozenset[int], np.ndarray] = {}
         self._build_worlds()
 
@@ -107,6 +95,7 @@ class LiveEdgeECOracle:
 
     def clear_score_cache(self) -> None:
         self._score_cache.clear()
+        self._realized_score_cache.clear()
         self._activation_cache.clear()
 
     def _validate_seed_set(self, seeds: Iterable[int]) -> frozenset[int]:
@@ -139,7 +128,7 @@ class LiveEdgeECOracle:
         return probs.copy()
 
     def score(self, seeds: Iterable[int]) -> float:
-        """Compute paper-defined EC(S) using fixed-world MC activation probabilities."""
+        """Paper-defined EC: clip expected coverage after MC averaging."""
         key = self._validate_seed_set(seeds)
         cached = self._score_cache.get(key)
         if cached is not None:
@@ -151,6 +140,32 @@ class LiveEdgeECOracle:
         coverage = (activation[:, None] * self.contribution).sum(axis=0)
         score = float(np.minimum(coverage / self.instance.demand, 1.0).mean())
         self._score_cache[key] = score
+        return score
+
+    def realized_score(self, seeds: Iterable[int]) -> float:
+        """Expected realized EC: clip per live-edge world, then average.
+
+        This is not substituted for the conference objective. It is reported as a
+        construct-validity/robustness metric for stochastic task fulfillment.
+        """
+        key = self._validate_seed_set(seeds)
+        cached = self._realized_score_cache.get(key)
+        if cached is not None:
+            return cached
+        if not key:
+            self._realized_score_cache[key] = 0.0
+            return 0.0
+        n = len(self.nodes)
+        positions = [self.candidate_position[v] for v in key]
+        total = 0.0
+        for world in self._reachability:
+            active = np.zeros(n, dtype=np.bool_)
+            for pos in positions:
+                active[world[pos]] = True
+            coverage = self.contribution[active].sum(axis=0)
+            total += float(np.minimum(coverage / self.instance.demand, 1.0).mean())
+        score = total / self.mc_times
+        self._realized_score_cache[key] = score
         return score
 
     def marginal_gain(self, selected: Iterable[int], candidate: int) -> float:
