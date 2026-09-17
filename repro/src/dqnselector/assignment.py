@@ -83,6 +83,71 @@ def greedy_capacity_assignment(
     )
 
 
+def lp_relaxation_upper_bound(
+    active_workers,
+    suitability: np.ndarray,
+    demand: np.ndarray,
+    capacity: int = 1,
+) -> float:
+    """LP relaxation upper bound for the finite-capacity assignment objective.
+
+    Binary assignment variables x[u,t] are relaxed to [0,1]. Task variables y[t]
+    represent capped satisfaction and obey y[t] <= sum_u s[u,t]/d[t] * x[u,t]
+    and y[t] <= 1. Because the integer feasible region is contained in this LP,
+    the returned mean satisfaction is a rigorous upper bound on the optimal
+    integral assignment. SciPy is imported lazily so the core package does not
+    require it for ordinary experiments.
+    """
+    try:
+        from scipy.optimize import linprog
+        from scipy.sparse import coo_matrix
+    except Exception as exc:  # pragma: no cover - optional validation path
+        raise RuntimeError("SciPy is required for LP assignment validation") from exc
+
+    workers = sorted({int(u) for u in active_workers})
+    s = np.asarray(suitability, dtype=float)
+    d = np.asarray(demand, dtype=float)
+    if not workers:
+        return 0.0
+    if capacity <= 0 or np.any(d <= 0):
+        raise ValueError("positive capacity and demand are required")
+    if s.ndim != 2 or s.shape[1] != len(d):
+        raise ValueError("suitability/demand shape mismatch")
+
+    m, t = len(workers), len(d)
+    n_x = m * t
+    n_var = n_x + t
+    # Minimize -mean(y).
+    c = np.zeros(n_var, dtype=float)
+    c[n_x:] = -1.0 / max(t, 1)
+
+    rows = []
+    cols = []
+    vals = []
+    b = []
+    r = 0
+    # Worker capacity constraints: sum_t x[u,t] <= capacity.
+    for i in range(m):
+        for j in range(t):
+            rows.append(r); cols.append(i * t + j); vals.append(1.0)
+        b.append(float(capacity)); r += 1
+    # Task satisfaction constraints: y_t - sum_u s[u,t]/d_t x[u,t] <= 0.
+    for j in range(t):
+        for i, u in enumerate(workers):
+            coeff = float(s[u, j] / d[j])
+            if coeff != 0.0:
+                rows.append(r); cols.append(i * t + j); vals.append(-coeff)
+        rows.append(r); cols.append(n_x + j); vals.append(1.0)
+        b.append(0.0); r += 1
+
+    A_ub = coo_matrix((vals, (rows, cols)), shape=(r, n_var)).tocsr()
+    bounds = [(0.0, 1.0)] * n_var
+    res = linprog(c, A_ub=A_ub, b_ub=np.asarray(b), bounds=bounds, method="highs")
+    if not res.success:
+        raise RuntimeError(f"LP assignment validation failed: {res.message}")
+    return float(-res.fun)
+
+
 def unconstrained_parallel_satisfaction(active_workers, suitability: np.ndarray, demand: np.ndarray) -> float:
     """Diagnostic corresponding to the unrealistic 'every active worker serves every task' relaxation."""
     workers = sorted({int(u) for u in active_workers})
