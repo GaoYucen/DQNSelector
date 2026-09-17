@@ -14,7 +14,12 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "repro" / "src"))
 
-from dqnselector.baselines import celf, degree_greedy, one_step_coverage_greedy
+from dqnselector.baselines import (
+    celf,
+    degree_greedy,
+    objective_aware_one_step_greedy,
+    one_step_coverage_greedy,
+)
 from dqnselector.oracle import LiveEdgeECOracle
 from dqnselector.reconstruction import load_reconstruction
 from dqnselector.selector import RainbowSelector, greedy_select
@@ -82,16 +87,26 @@ def main():
 
     methods: dict[str, list[int]] = {}
     selection_seconds: dict[str, float] = {}
+    direct_values = inst.participation * inst.quality
 
     t0 = time.perf_counter()
     methods["DegreeGreedy"] = degree_greedy(inst.graph, max_k, pool)
     selection_seconds["DegreeGreedy"] = time.perf_counter() - t0
 
+    # Retain the conference-compatible baseline exactly as a compatibility comparator.
     t0 = time.perf_counter()
     methods["CoverageGreedy"] = one_step_coverage_greedy(
-        inst.graph, inst.participation * inst.quality, max_k, inst.nodes, pool
+        inst.graph, direct_values, max_k, inst.nodes, pool
     )
     selection_seconds["CoverageGreedy"] = time.perf_counter() - t0
+
+    # Stronger scientific heuristic: direct contribution + one-hop expectation,
+    # normalized by heterogeneous demand before static ranking.
+    t0 = time.perf_counter()
+    methods["ObjCovGreedy"] = objective_aware_one_step_greedy(
+        inst.graph, direct_values, inst.demand, max_k, inst.nodes, pool
+    )
+    selection_seconds["ObjCovGreedy"] = time.perf_counter() - t0
 
     if not a.skip_celf:
         t0 = time.perf_counter()
@@ -188,7 +203,11 @@ def main():
         "random_selection_seconds_mean": float(np.mean(random_selection_seconds)),
         "random_mean_by_k": random_mean,
         "device": device,
-        "note": "All final diagnostics use independent evaluation live-edge worlds; CELF uses separate selection worlds.",
+        "note": (
+            "All final diagnostics use independent evaluation live-edge worlds; CELF uses "
+            "separate selection worlds. CoverageGreedy is conference-compatible; "
+            "ObjCovGreedy is the demand-aware direct+one-hop scientific heuristic."
+        ),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
