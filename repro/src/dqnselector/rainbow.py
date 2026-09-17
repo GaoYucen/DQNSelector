@@ -86,7 +86,32 @@ class PairwiseDuelingC51(nn.Module):
             if isinstance(module, NoisyLinear):
                 module.reset_noise()
 
-    def logits(self, state: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _normalize_action_mask(
+        action_mask: torch.Tensor | None,
+        batch_size: int,
+        action_count: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if action_mask is None:
+            return None
+        mask = torch.as_tensor(action_mask, dtype=torch.bool, device=device)
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
+        if mask.ndim != 2 or mask.shape[1] != action_count:
+            raise ValueError("action mask must have shape [batch, actions]")
+        if mask.shape[0] == 1 and batch_size != 1:
+            mask = mask.expand(batch_size, -1)
+        elif mask.shape[0] != batch_size:
+            raise ValueError("action mask batch size mismatch")
+        return mask
+
+    def logits(
+        self,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if state.ndim == 1:
             state = state.unsqueeze(0)
         if actions.ndim == 2:
@@ -94,21 +119,48 @@ class PairwiseDuelingC51(nn.Module):
         if state.shape[0] != actions.shape[0]:
             if state.shape[0] == 1:
                 state = state.expand(actions.shape[0], -1)
+            elif actions.shape[0] == 1:
+                actions = actions.expand(state.shape[0], -1, -1)
             else:
                 raise ValueError("state/actions batch size mismatch")
+        mask = self._normalize_action_mask(
+            action_mask, state.shape[0], actions.shape[1], actions.device
+        )
         s = F.relu(self.state_fc(state))
         a = F.relu(self.action_fc(actions))
         joint = F.relu(s.unsqueeze(1) + a)
         value = self.value_out(F.relu(self.value_hidden(s))).unsqueeze(1)
         advantage = self.adv_out(F.relu(self.adv_hidden(joint)))
-        return value + advantage - advantage.mean(dim=1, keepdim=True)
+        if mask is None:
+            advantage_mean = advantage.mean(dim=1, keepdim=True)
+        else:
+            weights = mask.to(dtype=advantage.dtype).unsqueeze(-1)
+            denom = weights.sum(dim=1, keepdim=True).clamp_min(1.0)
+            advantage_mean = (advantage * weights).sum(dim=1, keepdim=True) / denom
+        return value + advantage - advantage_mean
 
-    def distribution(self, state: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        return torch.softmax(self.logits(state, actions), dim=-1).clamp_min(1e-8)
+    def distribution(
+        self,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.softmax(self.logits(state, actions, action_mask), dim=-1).clamp_min(1e-8)
 
-    def q_values(self, state: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        dist = self.distribution(state, actions)
-        return (dist * self.support).sum(dim=-1)
+    def q_values(
+        self,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        dist = self.distribution(state, actions, action_mask)
+        q = (dist * self.support).sum(dim=-1)
+        if action_mask is not None:
+            mask = self._normalize_action_mask(
+                action_mask, q.shape[0], q.shape[1], q.device
+            )
+            q = q.masked_fill(~mask, -torch.inf)
+        return q
 
 
 @dataclass
