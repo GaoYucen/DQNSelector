@@ -18,6 +18,9 @@ from dqnselector.piic import piic
 from dqnselector.reconstruction import load_reconstruction
 
 
+SCIENTIFIC_PROFILES = {"journal_scientific_v1", "journal_scientific_v2"}
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--instance", required=True)
@@ -31,10 +34,7 @@ def parse_args():
         "--coverage-feature",
         choices=["auto", "legacy-quality", "objective-contribution"],
         default="auto",
-        help=(
-            "auto uses objective-contribution for journal_scientific_v1 and "
-            "legacy-quality otherwise"
-        ),
+        help="auto uses objective-contribution for scientific journal profiles",
     )
     p.add_argument("--seed", type=int, default=2024)
     return p.parse_args()
@@ -49,9 +49,7 @@ def main():
     coverage_feature = a.coverage_feature
     if coverage_feature == "auto":
         coverage_feature = (
-            "objective-contribution"
-            if profile == "journal_scientific_v1"
-            else "legacy-quality"
+            "objective-contribution" if profile in SCIENTIFIC_PROFILES else "legacy-quality"
         )
 
     t0 = time.perf_counter()
@@ -109,9 +107,8 @@ def main():
         "coverage_r_mean": float(np.nanmean(coverage_r)),
         "coverage_r_max": float(np.nanmax(coverage_r)),
         "warning": (
-            "PIIC influence range R is a modeling hyperparameter and is recorded explicitly. "
-            "For journal_scientific_v1, objective-contribution uses p*q/d and includes the "
-            "candidate's direct term; legacy-quality is retained only for setting ablations."
+            "PIIC range is a modeling hyperparameter. Scientific profiles use p*q/d "
+            "with the candidate direct term; legacy-quality is retained only for ablation."
         ),
     }
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
