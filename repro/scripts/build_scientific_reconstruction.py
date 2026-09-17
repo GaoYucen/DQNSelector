@@ -12,6 +12,9 @@ from dqnselector.reconstruction import save_reconstruction
 from dqnselector.scientific import ScientificReconstructionConfig, reconstruct_scientific_instance
 
 
+MAIN_LOAD_FACTOR = 1.25
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Build the journal scientific DQNSelector instance")
     p.add_argument("--dataset", required=True, choices=["gowalla", "brightkite"])
@@ -22,7 +25,12 @@ def parse_args():
     p.add_argument("--worker-pool", type=int, default=300)
     p.add_argument("--targets", type=int, default=100)
     p.add_argument("--seed", type=int, default=2024)
-    p.add_argument("--load-factor", type=float, default=0.50)
+    p.add_argument(
+        "--load-factor",
+        type=float,
+        default=MAIN_LOAD_FACTOR,
+        help="Scientific-v1 main setting is rho=1.25; sweep other regimes explicitly.",
+    )
     p.add_argument("--demand-activity-power", type=float, default=0.50)
     p.add_argument("--demand-floor-ratio", type=float, default=0.05)
     p.add_argument("--participation-quantile", type=float, default=0.50)
