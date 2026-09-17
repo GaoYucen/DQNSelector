@@ -22,13 +22,24 @@ def parse_args():
     p.add_argument('--eval-budgets',type=int,nargs='+',default=[5,10,20,30,50]); p.add_argument('--oracle-mc',type=int,default=10)
     p.add_argument('--eval-mc',type=int,default=30); p.add_argument('--hidden',type=int,default=64); p.add_argument('--atoms',type=int,default=31)
     p.add_argument('--learning-rate',type=float,default=3e-4); p.add_argument('--batch-size',type=int,default=16); p.add_argument('--warmup',type=int,default=32)
+    p.add_argument('--task-embedding',choices=['direct','singleton_mc'],default='direct')
+    p.add_argument('--embedding-mc',type=int,default=20)
     p.add_argument('--seed',type=int,default=2026); p.add_argument('--device',default='cuda')
     return p.parse_args()
 
 
 def main():
     a=parse_args(); out=Path(a.output); out.mkdir(parents=True,exist_ok=True)
-    inst,man=load_journal_instance(a.instance); social,task=build_journal_embeddings(inst)
+    inst,man=load_journal_instance(a.instance)
+    t=time.perf_counter()
+    social,task=build_journal_embeddings(
+        inst,
+        task_mode=a.task_embedding,
+        mc_times=a.embedding_mc,
+        random_seed=a.seed+3001,
+        worker_capacity=1,
+    )
+    embedding_sec=time.perf_counter()-t
     np.savez_compressed(out/'embeddings.npz',social=social,task=task)
     device=a.device if (not a.device.startswith('cuda') or torch.cuda.is_available()) else 'cpu'
     t=time.perf_counter(); train_oracle=JournalLiveEdgeOracle(inst,mc_times=a.oracle_mc,random_seed=a.seed,worker_capacity=1); oracle_build=time.perf_counter()-t
@@ -41,7 +52,7 @@ def main():
         if k>len(order): continue
         evaluation[str(k)]=eval_oracle.evaluate(order[:k]); print('k',k,evaluation[str(k)])
     torch.save(model.state_dict(),out/'model.pt'); np.save(out/'selection_order.npy',np.asarray(order,dtype=np.int64))
-    metrics={'device':device,'episodes':a.episodes,'train_budget':a.train_budget,'oracle_mc':a.oracle_mc,'eval_mc':a.eval_mc,'oracle_build_seconds':oracle_build,'training_seconds':train_sec,'episode_returns':stats.episode_returns,'losses':stats.losses,'evaluation':evaluation,'selection_order':order,'instance_config':man.get('config',{})}
+    metrics={'device':device,'episodes':a.episodes,'train_budget':a.train_budget,'oracle_mc':a.oracle_mc,'eval_mc':a.eval_mc,'task_embedding':a.task_embedding,'embedding_mc':a.embedding_mc,'embedding_seconds':embedding_sec,'oracle_build_seconds':oracle_build,'training_seconds':train_sec,'episode_returns':stats.episode_returns,'losses':stats.losses,'evaluation':evaluation,'selection_order':order,'instance_config':man.get('config',{}),'variant':man.get('variant',{})}
     (out/'metrics.json').write_text(json.dumps(metrics,indent=2),encoding='utf-8'); print('saved',out)
 
 if __name__=='__main__': main()
