@@ -20,13 +20,13 @@ class ScientificV2ReconstructionConfig:
     """Scientifically conservative journal benchmark construction.
 
     V2 keeps the original ECM optimization problem but avoids interpreting
-    unobserved quantities as if they were measured labels.  Participation is a
+    unobserved quantities as if they were measured labels. Participation is a
     frequency-aware spatial availability proxy, the main quality setting is
     uniform, target areas are sampled from empirically active cells, and social
     diffusion uses the classical TRI protocol unless explicitly overridden.
 
     ``structure_seed`` controls users, social edge probabilities, and the worker
-    pool. ``task_seed`` controls target-area sampling only.  Consequently one can
+    pool. ``task_seed`` controls target-area sampling only. Consequently one can
     vary task instances while holding the worker/social environment fixed.
     """
 
@@ -43,26 +43,15 @@ class ScientificV2ReconstructionConfig:
     structure_seed: int = 2024
     task_seed: int = 2024
     bidirectional_edges: bool = True
-
-    # Participation: frequency-aware historical spatial availability.
     participation_distance_quantile: float = 0.50
-
-    # Main setting avoids inventing sensing-quality labels.  The activity proxy
-    # remains available only as an explicit sensitivity/ablation setting.
     quality_mode: str = "uniform"
     quality_floor: float = 0.25
     quality_lower_quantile: float = 0.10
     quality_upper_quantile: float = 0.90
-
-    # Demand is a normalized load protocol rather than empirical task demand.
     load_factor: float = 1.50
     demand_activity_power: float = 0.50
     demand_floor_ratio: float = 0.05
-
-    # Target cells are empirical activity locations by default.
     target_sampling: str = "active_uniform"
-
-    # Classical influence-maximization TRI protocol.
     trivalency_values: tuple[float, float, float] = (0.001, 0.01, 0.10)
 
 
@@ -109,10 +98,10 @@ def _frequency_aware_participation(
 ) -> tuple[np.ndarray, float, np.ndarray]:
     """Historical visitation-kernel participation proxy.
 
-    The scale is estimated robustly from each user/target pair's nearest observed
-    visit, while the probability itself averages the distance kernel over *all*
-    historical visits.  Thus one isolated nearby visit does not make a user look
-    equivalent to another user who repeatedly visits the target area.
+    The scale is estimated from nearest historical distances when possible, while
+    the probability itself averages the distance kernel over all historical visits.
+    If every user-target pair has an exact historical hit, the scale falls back to
+    all non-zero visit-to-target distances rather than becoming undefined.
     """
     if not user_locations:
         raise ValueError("user_locations must not be empty")
@@ -127,7 +116,10 @@ def _frequency_aware_participation(
         min_dist[i] = d.min(axis=0)
     positive = min_dist[min_dist > 1e-12]
     if positive.size == 0:
-        raise RuntimeError("degenerate spatial distances")
+        positive_parts = [d[d > 1e-12] for d in distance_mats if np.any(d > 1e-12)]
+        if not positive_parts:
+            raise RuntimeError("degenerate spatial distances: all visits coincide with all targets")
+        positive = np.concatenate(positive_parts)
     tau_km = max(float(np.quantile(positive, distance_quantile)), 1e-12)
     participation = np.vstack(
         [np.exp(-d / tau_km).mean(axis=0, keepdims=True) for d in distance_mats]
@@ -184,7 +176,6 @@ def _load_calibrated_demand(
     if positive_capacity.size == 0:
         raise RuntimeError("candidate pool has zero direct capacity")
     capacity_scale = float(np.median(positive_capacity))
-
     counts = np.asarray(target_checkin_counts, dtype=np.float64)
     activity_weight = np.power(counts + 1.0, cfg.demand_activity_power)
     activity_weight /= max(float(activity_weight.mean()), 1e-12)
@@ -226,24 +217,20 @@ def reconstruct_scientific_v2_instance(
     _validate_config(cfg)
     structure_rng = np.random.default_rng(cfg.structure_seed)
     task_rng = np.random.default_rng(cfg.task_seed)
-
     source_edges, edge_nodes = _read_edge_nodes(edge_path)
     region_users, grid_counts, region_records = _scan_checkins(checkin_path, cfg)
     eligible = np.asarray(sorted(edge_nodes & region_users), dtype=np.int64)
     if eligible.size < cfg.n_users:
         raise ValueError(f"only {eligible.size} region-eligible users, need {cfg.n_users}")
-
     sampled_original = structure_rng.choice(eligible, size=cfg.n_users, replace=False)
     sampled_set = set(int(x) for x in sampled_original.tolist())
     locs = _collect_user_locations(checkin_path, sampled_set, cfg)
     if any(len(locs[u]) == 0 for u in sampled_set):
         raise RuntimeError("sampled region user unexpectedly has no in-region check-ins")
-
     flat_cells = _sample_target_cells(grid_counts, cfg, task_rng)
     cells = [(int(c // cfg.lat_cells), int(c % cfg.lat_cells)) for c in flat_cells]
     centers = np.asarray([_cell_center(x, y, cfg) for x, y in cells], dtype=np.float64)
     selected_counts = np.asarray([grid_counts[x, y] for x, y in cells], dtype=np.float64)
-
     original_to_new = {int(u): i for i, u in enumerate(sampled_original.tolist())}
     n, h = cfg.n_users, cfg.n_target_subareas
     user_locations: list[np.ndarray] = [np.empty((0, 2), dtype=np.float64) for _ in range(n)]
@@ -252,18 +239,15 @@ def reconstruct_scientific_v2_instance(
         xy = np.asarray(locs[original], dtype=np.float64)
         user_locations[new] = xy
         user_checkin_counts[new] = float(xy.shape[0])
-
     participation, tau_km, min_dist = _frequency_aware_participation(
         user_locations, centers, cfg.participation_distance_quantile
     )
-
     if cfg.quality_mode == "uniform":
         worker_quality = np.ones(n, dtype=np.float64)
     else:
         worker_quality = _activity_reliability(user_checkin_counts, cfg)
     quality = np.repeat(worker_quality[:, None], h, axis=1)
     contribution = participation * quality
-
     graph = nx.DiGraph()
     graph.add_nodes_from(range(n))
     retained_source_edges = 0
@@ -276,7 +260,6 @@ def reconstruct_scientific_v2_instance(
         graph.add_edge(u, v, weight=float(structure_rng.choice(tri)))
         if cfg.bidirectional_edges:
             graph.add_edge(v, u, weight=float(structure_rng.choice(tri)))
-
     pool_size = min(cfg.worker_pool_size, n)
     worker_pool = set(
         int(x) for x in structure_rng.choice(n, size=pool_size, replace=False).tolist()
@@ -284,7 +267,6 @@ def reconstruct_scientific_v2_instance(
     demand, demand_info = _load_calibrated_demand(
         selected_counts, contribution, worker_pool, cfg
     )
-
     instance = ECMInstance(
         graph=graph,
         nodes=list(range(n)),
