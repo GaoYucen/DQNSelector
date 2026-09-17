@@ -18,11 +18,12 @@
     "upper_quantile": 0.9
   },
   "demand": {
-    "main_load_factor": 1.25,
-    "sensitivity_load_factors": [0.75, 1.0, 1.25, 1.5],
+    "main_load_factor": 1.5,
+    "sensitivity_load_factors": [1.25, 1.5, 1.75, 2.0],
     "activity_power": 0.5,
     "floor_ratio": 0.05,
-    "calibration": "global median positive direct capacity of the candidate pool"
+    "calibration": "global median positive direct capacity of the candidate pool",
+    "selection_rationale": "rho=1.50 selected after strong-baseline recalibration with ObjCovGreedy and CELF; at k=50 CELF saturation is about 0.14 on Gowalla and 0.07 on Brightkite while random remains far below strong methods."
   },
   "influence": {
     "model": "independent_cascade",
