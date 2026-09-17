@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 import heapq
 
 import networkx as nx
+import numpy as np
 
 
 def degree_greedy(graph: nx.DiGraph, k: int, worker_pool: Iterable[int] | None = None) -> list[int]:
@@ -19,10 +20,12 @@ def one_step_coverage_greedy(
     nodes: list[int],
     worker_pool: Iterable[int] | None = None,
 ) -> list[int]:
-    """Paper CovGreedy idea: rank nodes by directly influenced coverage.
+    """Paper-compatible CovGreedy: rank by one-hop influenced coverage.
 
     `node_values[u]` should contain the per-subarea p_u^i*q_u^i term. Edge
-    probability w(v,u) is applied here, matching the paper's CovGreedy formula.
+    probability w(v,u) is applied here, matching the released-paper baseline
+    interpretation. The candidate's own direct term is intentionally not added;
+    this behavior is retained for conference compatibility.
     """
     index = {v: i for i, v in enumerate(nodes)}
     pool = list(nodes if worker_pool is None else worker_pool)
@@ -35,6 +38,52 @@ def one_step_coverage_greedy(
         scores.append((total, int(v)))
     scores.sort(key=lambda item: (item[0], -item[1]), reverse=True)
     return [v for _, v in scores[:k]]
+
+
+def objective_aware_one_step_greedy(
+    graph: nx.DiGraph,
+    node_values,
+    demand,
+    k: int,
+    nodes: list[int],
+    worker_pool: Iterable[int] | None = None,
+) -> list[int]:
+    """Scientific static heuristic using direct + expected one-hop EC utility.
+
+    For each selectable worker v, form a no-overlap, one-hop approximation to the
+    per-area coverage vector:
+
+        c_v = value(v) + sum_{(v,u)} w(v,u) value(u)
+
+    and rank v by mean_i min(c_v[i] / d_i, 1).  In the journal scientific
+    setting, `node_values` is p*q, so the score is demand-aware and includes the
+    worker's own direct sensing contribution.  It remains a cheap static heuristic:
+    it does not account for multi-hop cascades or overlap among multiple seeds.
+
+    Keeping this separate from `one_step_coverage_greedy` avoids silently changing
+    the conference-compatible baseline while giving the journal study a stronger,
+    scientifically aligned heuristic comparator.
+    """
+    values = np.asarray(node_values, dtype=np.float64)
+    demand = np.asarray(demand, dtype=np.float64)
+    if values.ndim != 2 or demand.shape != (values.shape[1],):
+        raise ValueError("node_values must be [n_nodes,n_subareas] with matching demand")
+    if np.any(demand <= 0):
+        raise ValueError("demand must be positive")
+    index = {v: i for i, v in enumerate(nodes)}
+    pool = list(nodes if worker_pool is None else worker_pool)
+    scores: list[tuple[float, int]] = []
+    for v in pool:
+        if v not in index:
+            continue
+        approx = values[index[v]].copy()
+        for u in graph.successors(v):
+            if u in index:
+                approx += float(graph[v][u].get("weight", 1.0)) * values[index[u]]
+        score = float(np.minimum(approx / demand, 1.0).mean())
+        scores.append((score, int(v)))
+    scores.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    return [v for _, v in scores[: min(k, len(scores))]]
 
 
 def greedy_by_marginal_gain(
