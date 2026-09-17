@@ -17,17 +17,26 @@ class OracleStats:
 
 
 class LiveEdgeECOracle:
-    """Reusable Monte-Carlo oracle for repeated EC(S) and marginal-gain queries.
+    """Reusable fixed-world Monte-Carlo oracle for the paper-defined EC(S).
 
     Under the Independent Cascade model, one Monte-Carlo realization can be
     represented as a live-edge graph: each edge (u,v) is retained independently
     with probability w(u,v), and the activated nodes are exactly those reachable
     from S. By fixing a set of live-edge worlds once, all algorithms see the same
-    stochastic objective and repeated reward/CELF queries become deterministic.
+    stochastic influence sample and repeated reward/CELF queries are deterministic.
 
-    This is an evaluation/training acceleration, not a change to the paper's ECM
-    objective. The default precomputation is limited to the worker pool because
-    only worker-pool nodes can be selected as seeds.
+    Crucially, the ECM objective first estimates each node's activation probability
+    p_v(S) across Monte-Carlo worlds, then forms expected coverage
+
+        C_i(S) = sum_v p_v(S) * p_v^i * q_v^i,
+
+    and only then applies the demand cap min(C_i/d_i, 1).  Clipping separately in
+    each live-edge world and averaging afterwards would be a different objective
+    because clipping is nonlinear.  `score()` therefore derives fixed-world
+    activation probabilities first and applies the cap once to expected coverage.
+
+    The default precomputation is limited to the worker pool because only
+    worker-pool nodes can be selected as seeds.
     """
 
     def __init__(
@@ -45,8 +54,6 @@ class LiveEdgeECOracle:
         self.nodes = list(instance.nodes)
         self.node_index = {v: i for i, v in enumerate(self.nodes)}
         if self.nodes != list(range(len(self.nodes))):
-            # The reproduction pipeline renumbers nodes densely. Supporting a
-            # general node ordering is possible but would complicate the hot path.
             raise ValueError("LiveEdgeECOracle currently requires dense node ids 0..n-1")
         if seed_candidates is None:
             seed_candidates = sorted(instance.worker_pool or set(instance.nodes))
@@ -60,6 +67,7 @@ class LiveEdgeECOracle:
         )
         self._reachability: list[list[np.ndarray]] = []
         self._score_cache: dict[frozenset[int], float] = {}
+        self._activation_cache: dict[frozenset[int], np.ndarray] = {}
         self._build_worlds()
 
     def _build_worlds(self) -> None:
@@ -99,6 +107,7 @@ class LiveEdgeECOracle:
 
     def clear_score_cache(self) -> None:
         self._score_cache.clear()
+        self._activation_cache.clear()
 
     def _validate_seed_set(self, seeds: Iterable[int]) -> frozenset[int]:
         key = frozenset(int(v) for v in seeds)
@@ -107,7 +116,30 @@ class LiveEdgeECOracle:
             raise ValueError(f"oracle has no precomputed reachability for seeds {sorted(unknown)[:5]}")
         return key
 
+    def activation_probability(self, seeds: Iterable[int]) -> np.ndarray:
+        """Return fixed-world Monte-Carlo activation probabilities p_v(S)."""
+        key = self._validate_seed_set(seeds)
+        cached = self._activation_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+        n = len(self.nodes)
+        if not key:
+            probs = np.zeros(n, dtype=np.float64)
+            self._activation_cache[key] = probs
+            return probs.copy()
+        counts = np.zeros(n, dtype=np.int64)
+        positions = [self.candidate_position[v] for v in key]
+        for world in self._reachability:
+            active = np.zeros(n, dtype=np.bool_)
+            for pos in positions:
+                active[world[pos]] = True
+            counts += active
+        probs = counts.astype(np.float64) / self.mc_times
+        self._activation_cache[key] = probs
+        return probs.copy()
+
     def score(self, seeds: Iterable[int]) -> float:
+        """Compute paper-defined EC(S) using fixed-world MC activation probabilities."""
         key = self._validate_seed_set(seeds)
         cached = self._score_cache.get(key)
         if cached is not None:
@@ -115,16 +147,9 @@ class LiveEdgeECOracle:
         if not key:
             self._score_cache[key] = 0.0
             return 0.0
-        candidate_positions = [self.candidate_position[v] for v in key]
-        n = len(self.nodes)
-        total = 0.0
-        for world in self._reachability:
-            active = np.zeros(n, dtype=np.bool_)
-            for pos in candidate_positions:
-                active[world[pos]] = True
-            coverage = self.contribution[active].sum(axis=0)
-            total += float(np.minimum(coverage / self.instance.demand, 1.0).mean())
-        score = total / self.mc_times
+        activation = self.activation_probability(key)
+        coverage = (activation[:, None] * self.contribution).sum(axis=0)
+        score = float(np.minimum(coverage / self.instance.demand, 1.0).mean())
         self._score_cache[key] = score
         return score
 
@@ -136,16 +161,3 @@ class LiveEdgeECOracle:
         if candidate not in self.candidate_position:
             raise ValueError(f"candidate {candidate} is not precomputed")
         return self.score(selected_key | {candidate}) - self.score(selected_key)
-
-    def activation_probability(self, seeds: Iterable[int]) -> np.ndarray:
-        """Return fixed-world MC activation probabilities for diagnostics."""
-        key = self._validate_seed_set(seeds)
-        n = len(self.nodes)
-        counts = np.zeros(n, dtype=np.int64)
-        positions = [self.candidate_position[v] for v in key]
-        for world in self._reachability:
-            active = np.zeros(n, dtype=np.bool_)
-            for pos in positions:
-                active[world[pos]] = True
-            counts += active
-        return counts.astype(np.float64) / self.mc_times
