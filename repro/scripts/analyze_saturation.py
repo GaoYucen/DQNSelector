@@ -13,7 +13,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "repro" / "src"))
 
-from dqnselector.baselines import degree_greedy, one_step_coverage_greedy
+from dqnselector.baselines import (
+    degree_greedy,
+    objective_aware_one_step_greedy,
+    one_step_coverage_greedy,
+)
 from dqnselector.oracle import LiveEdgeECOracle
 from dqnselector.reconstruction import load_reconstruction
 
@@ -73,12 +77,21 @@ def main():
     t0 = time.perf_counter()
     oracle = LiveEdgeECOracle(inst, mc_times=a.mc, random_seed=a.seed)
     oracle_seconds = time.perf_counter() - t0
+    direct_values = inst.participation * inst.quality
 
     methods: dict[str, list[int]] = {
         "DegreeGreedy": degree_greedy(inst.graph, max_k, pool),
         "CoverageGreedy": one_step_coverage_greedy(
             inst.graph,
-            inst.participation * inst.quality,
+            direct_values,
+            max_k,
+            inst.nodes,
+            pool,
+        ),
+        "ObjCovGreedy": objective_aware_one_step_greedy(
+            inst.graph,
+            direct_values,
+            inst.demand,
             max_k,
             inst.nodes,
             pool,
@@ -172,6 +185,7 @@ def main():
             "max": float(inst.demand.max()),
         },
         "random_mean_by_load_and_k": random_summary,
+        "methods": list(methods) + ["Random"],
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
