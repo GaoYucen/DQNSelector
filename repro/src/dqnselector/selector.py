@@ -164,20 +164,6 @@ def _state_vectors(encoded_nodes: torch.Tensor, masks: torch.Tensor) -> torch.Te
     return masks.to(dtype=encoded_nodes.dtype) @ encoded_nodes
 
 
-def _candidate_matrix(
-    model: RainbowSelector,
-    masks: torch.Tensor,
-    row_indices: torch.Tensor,
-    candidate_count: int,
-) -> torch.Tensor:
-    """Return [rows, candidate_count] indices for rows with equal candidate count."""
-    pool = torch.where(model.worker_pool_mask)[0]
-    row_masks = masks[row_indices]
-    available = ~row_masks[:, pool]
-    expanded_pool = pool.unsqueeze(0).expand(row_indices.numel(), -1)
-    return expanded_pool[available].reshape(row_indices.numel(), candidate_count)
-
-
 def _transition_batch_losses(
     online: RainbowSelector,
     target: RainbowSelector,
@@ -186,18 +172,22 @@ def _transition_batch_losses(
     encoded_target: torch.Tensor,
     gamma: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vectorized equivalent of `_transition_loss` for a replay minibatch.
+    """Vectorized Rainbow loss for a prioritized replay minibatch.
 
-    Candidate sets have variable length because different replay transitions come
-    from different selection depths. We group rows by candidate count before each
-    pair-conditioned dueling forward pass. Therefore the advantage-centering set is
-    exactly the same as in the single-transition implementation; no padded fake
-    actions enter the dueling mean.
+    Every replay row has the same worker pool but a different subset of currently
+    available candidates.  Earlier code grouped rows by candidate count, which was
+    mathematically exact but launched many small GPU kernels.  Here all worker-pool
+    actions are evaluated in one padded batch and a boolean action mask is used in
+    the dueling advantage centering.  Invalid/padded actions therefore contribute
+    neither to the dueling mean nor to Double-DQN action selection, making this
+    equivalent to the variable-length reference calculation while substantially
+    improving GPU utilization.
     """
     if not batch:
         raise ValueError("batch must not be empty")
     device = encoded_online.device
     bsz = len(batch)
+    rows_all = torch.arange(bsz, device=device)
     state_masks = _stack_masks(batch, "state_mask", device)
     next_masks = _stack_masks(batch, "next_state_mask", device)
     actions = torch.tensor([tr.action for tr in batch], dtype=torch.long, device=device)
@@ -206,44 +196,52 @@ def _transition_batch_losses(
     n_steps = torch.tensor([int(tr.n_steps) for tr in batch], dtype=torch.long, device=device)
 
     pool = torch.where(online.worker_pool_mask)[0]
-    candidate_counts = (~state_masks[:, pool]).sum(dim=1)
-    pred = torch.empty((bsz, online.qnet.atoms), dtype=encoded_online.dtype, device=device)
-    state_vecs = _state_vectors(encoded_online, state_masks)
+    if pool.numel() == 0:
+        raise RuntimeError("worker pool is empty")
+    pool_positions = torch.full((online.n_nodes,), -1, dtype=torch.long, device=device)
+    pool_positions[pool] = torch.arange(pool.numel(), device=device)
+    action_positions = pool_positions[actions]
+    if bool((action_positions < 0).any()):
+        raise RuntimeError("stored action is outside the worker pool")
 
-    # Grouping by equal candidate count preserves the exact dueling centering set.
-    for count in torch.unique(candidate_counts).tolist():
-        if count <= 0:
-            raise RuntimeError("transition has no valid action")
-        rows = torch.where(candidate_counts == count)[0]
-        candidates = _candidate_matrix(online, state_masks, rows, int(count))
-        matches = candidates == actions[rows, None]
-        if not bool(matches.any(dim=1).all()):
-            raise RuntimeError("stored action is not valid for transition state")
-        positions = matches.to(torch.int64).argmax(dim=1)
-        dist_all = online.qnet.distribution(state_vecs[rows], encoded_online[candidates])
-        pred[rows] = dist_all[torch.arange(rows.numel(), device=device), positions]
+    candidate_mask = ~state_masks[:, pool]
+    if not bool(candidate_mask[rows_all, action_positions].all()):
+        raise RuntimeError("stored action is not valid for transition state")
+    state_vecs = _state_vectors(encoded_online, state_masks)
+    pool_actions_online = encoded_online[pool].unsqueeze(0)
+    pred_all = online.qnet.distribution(
+        state_vecs, pool_actions_online, action_mask=candidate_mask
+    )
+    pred = pred_all[rows_all, action_positions]
 
     with torch.no_grad():
         next_dist = torch.full_like(pred, 1.0 / online.qnet.atoms)
         nonterminal_rows = torch.where(dones == 0)[0]
         if nonterminal_rows.numel() > 0:
-            next_candidate_counts = (~next_masks[:, pool]).sum(dim=1)
-            next_state_online_all = _state_vectors(encoded_online, next_masks)
-            next_state_target_all = _state_vectors(encoded_target, next_masks)
-            for count in torch.unique(next_candidate_counts[nonterminal_rows]).tolist():
-                rows = nonterminal_rows[next_candidate_counts[nonterminal_rows] == count]
-                if count <= 0:
-                    continue
-                candidates = _candidate_matrix(online, next_masks, rows, int(count))
+            next_candidate_mask = ~next_masks[nonterminal_rows][:, pool]
+            has_candidate = next_candidate_mask.any(dim=1)
+            usable_rows = nonterminal_rows[has_candidate]
+            if usable_rows.numel() > 0:
+                usable_mask = next_candidate_mask[has_candidate]
+                next_state_online = _state_vectors(
+                    encoded_online, next_masks[usable_rows]
+                )
                 online_q = online.qnet.q_values(
-                    next_state_online_all[rows], encoded_online[candidates]
+                    next_state_online,
+                    pool_actions_online,
+                    action_mask=usable_mask,
                 )
                 best_pos = torch.argmax(online_q, dim=1)
-                target_dist_all = target.qnet.distribution(
-                    next_state_target_all[rows], encoded_target[candidates]
+                next_state_target = _state_vectors(
+                    encoded_target, next_masks[usable_rows]
                 )
-                next_dist[rows] = target_dist_all[
-                    torch.arange(rows.numel(), device=device), best_pos
+                target_dist_all = target.qnet.distribution(
+                    next_state_target,
+                    encoded_target[pool].unsqueeze(0),
+                    action_mask=usable_mask,
+                )
+                next_dist[usable_rows] = target_dist_all[
+                    torch.arange(usable_rows.numel(), device=device), best_pos
                 ]
 
         projected = torch.empty_like(pred)
