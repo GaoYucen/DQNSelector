@@ -1,0 +1,75 @@
+{
+  "profile": "journal_scientific_v2",
+  "purpose": "Scientifically conservative journal benchmark; preserves the ECM problem while reducing unsupported proxy assumptions.",
+  "datasets": ["gowalla", "brightkite"],
+  "graph_sizes": [3000, 5000],
+  "worker_pool_size": 300,
+  "target_subareas": 100,
+  "structure_seed": 2024,
+  "task_seeds_pilot": [2024, 2025],
+  "replication_seeds": [2024, 2025, 2026, 2027, 2028],
+  "participation": {
+    "proxy": "mean historical exp(-haversine_distance_km / robust distance scale)",
+    "distance_scale_quantile": 0.5,
+    "rationale": "frequency-aware historical availability; avoids equating one isolated nearby visit with repeated presence"
+  },
+  "quality": {
+    "main": "uniform",
+    "value": 1.0,
+    "sensitivity": "activity_reliability",
+    "rationale": "Gowalla/Brightkite contain no empirical sensing-quality labels"
+  },
+  "targets": {
+    "main_sampling": "active_uniform",
+    "sensitivities": ["active_weighted", "all_uniform"]
+  },
+  "demand": {
+    "main_load_factor": 1.5,
+    "sensitivity_load_factors": [1.25, 1.5, 1.75, 2.0],
+    "activity_power": 0.5,
+    "floor_ratio": 0.05,
+    "interpretation": "normalized system-load protocol, not observed task-demand labels"
+  },
+  "influence": {
+    "model": "independent_cascade",
+    "main_protocol": "classical_trivalency",
+    "values": [0.001, 0.01, 0.1],
+    "interpretation": "simulation protocol; friendship graph has no diffusion labels",
+    "sensitivity_required": true
+  },
+  "coverage_embedding": {
+    "main": "objective-contribution",
+    "base_feature": "participation * quality / demand",
+    "include_direct_term": true,
+    "piic_range": 2
+  },
+  "objective": {
+    "training_and_primary_evaluation": "canonical_ec",
+    "robustness_metric": "realized_ec",
+    "canonical": "clip expected coverage after activation-probability averaging",
+    "realized": "clip coverage in each live-edge world then average"
+  },
+  "generalization_pilot": {
+    "fixed": ["sampled users", "social graph", "edge probabilities", "worker pool"],
+    "vary": ["task seed / target areas", "load factor"],
+    "evaluation": "load trained encoder/Q-network weights only; preserve target-instance embeddings and worker-pool buffers"
+  },
+  "baselines": ["DegreeGreedy", "CoverageGreedy", "ObjCovGreedy", "CELF", "DQNSelector", "Random"],
+  "budgets": {
+    "primary": [5, 10, 20, 30, 40, 50],
+    "stress_test": [75, 100]
+  },
+  "training_baseline": {
+    "episodes": 100,
+    "train_budget": 50,
+    "social_embedding_dim": 128,
+    "social_embedding_mc": 100,
+    "graph_iterations": 30
+  },
+  "evaluation": {
+    "independent_live_edge_worlds": true,
+    "recommended_mc_worlds": 300,
+    "random_baseline_repeats": 20,
+    "report": ["canonical EC", "realized EC", "saturation fraction", "preprocessing time", "training time", "online selection time"]
+  }
+}
