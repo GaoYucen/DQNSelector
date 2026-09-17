@@ -104,6 +104,11 @@ def _transition_loss(
     encoded_target: torch.Tensor,
     gamma: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference single-transition Rainbow loss.
+
+    This deliberately remains available as a correctness reference for the batched
+    implementation below. Training uses `_transition_batch_losses` for efficiency.
+    """
     device = encoded_online.device
     state_mask = _to_mask(tr.state_mask, device)
     candidates = online.candidate_indices(state_mask)
@@ -149,6 +154,116 @@ def _transition_loss(
     return loss, td_error
 
 
+def _stack_masks(batch: list[Transition], attr: str, device: torch.device) -> torch.Tensor:
+    arrays = np.stack([getattr(tr, attr) for tr in batch], axis=0)
+    return torch.as_tensor(arrays, dtype=torch.bool, device=device)
+
+
+def _state_vectors(encoded_nodes: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+    # The state definition is the sum of selected gated worker representations.
+    return masks.to(dtype=encoded_nodes.dtype) @ encoded_nodes
+
+
+def _candidate_matrix(
+    model: RainbowSelector,
+    masks: torch.Tensor,
+    row_indices: torch.Tensor,
+    candidate_count: int,
+) -> torch.Tensor:
+    """Return [rows, candidate_count] indices for rows with equal candidate count."""
+    pool = torch.where(model.worker_pool_mask)[0]
+    row_masks = masks[row_indices]
+    available = ~row_masks[:, pool]
+    expanded_pool = pool.unsqueeze(0).expand(row_indices.numel(), -1)
+    return expanded_pool[available].reshape(row_indices.numel(), candidate_count)
+
+
+def _transition_batch_losses(
+    online: RainbowSelector,
+    target: RainbowSelector,
+    batch: list[Transition],
+    encoded_online: torch.Tensor,
+    encoded_target: torch.Tensor,
+    gamma: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized equivalent of `_transition_loss` for a replay minibatch.
+
+    Candidate sets have variable length because different replay transitions come
+    from different selection depths. We group rows by candidate count before each
+    pair-conditioned dueling forward pass. Therefore the advantage-centering set is
+    exactly the same as in the single-transition implementation; no padded fake
+    actions enter the dueling mean.
+    """
+    if not batch:
+        raise ValueError("batch must not be empty")
+    device = encoded_online.device
+    bsz = len(batch)
+    state_masks = _stack_masks(batch, "state_mask", device)
+    next_masks = _stack_masks(batch, "next_state_mask", device)
+    actions = torch.tensor([tr.action for tr in batch], dtype=torch.long, device=device)
+    rewards = torch.tensor([tr.reward for tr in batch], dtype=torch.float32, device=device)
+    dones = torch.tensor([float(tr.done) for tr in batch], dtype=torch.float32, device=device)
+    n_steps = torch.tensor([int(tr.n_steps) for tr in batch], dtype=torch.long, device=device)
+
+    pool = torch.where(online.worker_pool_mask)[0]
+    candidate_counts = (~state_masks[:, pool]).sum(dim=1)
+    pred = torch.empty((bsz, online.qnet.atoms), dtype=encoded_online.dtype, device=device)
+    state_vecs = _state_vectors(encoded_online, state_masks)
+
+    # Grouping by equal candidate count preserves the exact dueling centering set.
+    for count in torch.unique(candidate_counts).tolist():
+        if count <= 0:
+            raise RuntimeError("transition has no valid action")
+        rows = torch.where(candidate_counts == count)[0]
+        candidates = _candidate_matrix(online, state_masks, rows, int(count))
+        matches = candidates == actions[rows, None]
+        if not bool(matches.any(dim=1).all()):
+            raise RuntimeError("stored action is not valid for transition state")
+        positions = matches.to(torch.int64).argmax(dim=1)
+        dist_all = online.qnet.distribution(state_vecs[rows], encoded_online[candidates])
+        pred[rows] = dist_all[torch.arange(rows.numel(), device=device), positions]
+
+    with torch.no_grad():
+        next_dist = torch.full_like(pred, 1.0 / online.qnet.atoms)
+        nonterminal_rows = torch.where(dones == 0)[0]
+        if nonterminal_rows.numel() > 0:
+            next_candidate_counts = (~next_masks[:, pool]).sum(dim=1)
+            next_state_online_all = _state_vectors(encoded_online, next_masks)
+            next_state_target_all = _state_vectors(encoded_target, next_masks)
+            for count in torch.unique(next_candidate_counts[nonterminal_rows]).tolist():
+                rows = nonterminal_rows[next_candidate_counts[nonterminal_rows] == count]
+                if count <= 0:
+                    continue
+                candidates = _candidate_matrix(online, next_masks, rows, int(count))
+                online_q = online.qnet.q_values(
+                    next_state_online_all[rows], encoded_online[candidates]
+                )
+                best_pos = torch.argmax(online_q, dim=1)
+                target_dist_all = target.qnet.distribution(
+                    next_state_target_all[rows], encoded_target[candidates]
+                )
+                next_dist[rows] = target_dist_all[
+                    torch.arange(rows.numel(), device=device), best_pos
+                ]
+
+        projected = torch.empty_like(pred)
+        for steps in torch.unique(n_steps).tolist():
+            rows = torch.where(n_steps == steps)[0]
+            projected[rows] = project_c51_distribution(
+                next_dist[rows],
+                rewards[rows],
+                dones[rows],
+                gamma ** int(steps),
+                online.qnet.support,
+            )
+
+    per_loss = -(projected * pred.log()).sum(dim=1)
+    current_q = (pred.detach() * online.qnet.support).sum(dim=1)
+    target_q = (projected.detach() * online.qnet.support).sum(dim=1)
+    td_error = (target_q - current_q).abs()
+    return per_loss, td_error
+
+
 def train_rainbow_selector(
     model: RainbowSelector,
     reward_fn: Callable[[set[int], int], float],
@@ -182,6 +297,7 @@ def train_rainbow_selector(
     losses: list[float] = []
     selected_sets: list[list[int]] = []
     learn_steps = 0
+    worker_pool_size = int(model.worker_pool_mask.sum().item())
 
     for _episode in range(episodes):
         nstep.clear()
@@ -201,9 +317,7 @@ def train_rainbow_selector(
             reward = float(reward_fn(set(selected), action))
             next_mask = mask.copy()
             next_mask[action] = True
-            done = (t + 1 >= seed_budget) or (
-                int((model.worker_pool_mask.detach().cpu().numpy() & ~next_mask).sum()) == 0
-            )
+            done = (t + 1 >= seed_budget) or (len(selected) + 1 >= worker_pool_size)
             raw = Transition(mask.copy(), action, reward, next_mask.copy(), done, n_steps=1)
             for aggregated in nstep.push(raw):
                 replay.add(aggregated)
@@ -218,20 +332,20 @@ def train_rainbow_selector(
                 encoded_online = model.encode_nodes()
                 with torch.no_grad():
                     encoded_target = target.encode_nodes()
-                per_losses: list[torch.Tensor] = []
-                td_errors: list[float] = []
-                for tr, weight in zip(batch, importance.tolist()):
-                    loss_i, td_i = _transition_loss(
-                        model, target, tr, encoded_online, encoded_target, gamma
-                    )
-                    per_losses.append(loss_i * float(weight))
-                    td_errors.append(float(td_i.detach().cpu()))
-                loss = torch.stack(per_losses).mean()
+                per_losses, td_errors = _transition_batch_losses(
+                    model, target, batch, encoded_online, encoded_target, gamma
+                )
+                importance_t = torch.as_tensor(
+                    importance, dtype=per_losses.dtype, device=device
+                )
+                loss = (per_losses * importance_t).mean()
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                 optimizer.step()
-                replay.update_priorities(indices, np.asarray(td_errors, dtype=np.float64))
+                replay.update_priorities(
+                    indices, td_errors.detach().cpu().numpy().astype(np.float64, copy=False)
+                )
                 losses.append(float(loss.detach().cpu()))
                 learn_steps += 1
                 if learn_steps % target_update_interval == 0:
