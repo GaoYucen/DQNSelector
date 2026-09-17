@@ -3,7 +3,9 @@ from __future__ import annotations
 import networkx as nx
 import numpy as np
 
+from .assignment import greedy_capacity_assignment
 from .journal import JournalInstance
+from .journal_oracle import JournalLiveEdgeOracle
 
 
 def _zscore(x: np.ndarray) -> np.ndarray:
@@ -37,11 +39,72 @@ def structural_social_embedding(graph: nx.DiGraph) -> np.ndarray:
 
 
 def task_need_embedding(instance: JournalInstance) -> np.ndarray:
-    """Worker-task service potential normalized by task demand."""
+    """Direct worker-task service potential normalized by task demand."""
     demand = np.maximum(instance.demand.astype(np.float64), 1e-12)
     x = instance.suitability.astype(np.float64) / demand[None, :]
     return np.clip(x, 0.0, 1.0).astype(np.float32)
 
 
-def build_journal_embeddings(instance: JournalInstance) -> tuple[np.ndarray, np.ndarray]:
-    return structural_social_embedding(instance.graph), task_need_embedding(instance)
+def singleton_service_embedding(
+    instance: JournalInstance,
+    mc_times: int = 20,
+    random_seed: int = 0,
+    worker_capacity: int = 1,
+) -> np.ndarray:
+    """Expected per-task satisfaction profile caused by recruiting one seed.
+
+    For each candidate worker, fixed live-edge worlds simulate the global social
+    recruitment cascade. Activated workers are then allocated under the same
+    finite-capacity dispatcher used by the journal objective. The resulting
+    T-dimensional vector therefore summarizes *downstream usable task service*,
+    not merely direct geographic suitability of the seed itself.
+
+    Non-candidate rows are kept at zero because the selector only chooses from
+    `worker_pool`; this makes the precomputation proportional to the candidate
+    pool rather than all graph nodes.
+    """
+    oracle = JournalLiveEdgeOracle(
+        instance,
+        mc_times=mc_times,
+        random_seed=random_seed,
+        worker_capacity=worker_capacity,
+        precompute_candidates=True,
+    )
+    n = instance.graph.number_of_nodes()
+    t = instance.suitability.shape[1]
+    out = np.zeros((n, t), dtype=np.float32)
+    for u in sorted(instance.worker_pool):
+        profiles = []
+        for w in range(oracle.mc_times):
+            active = oracle._active_for_world((int(u),), w)
+            r = greedy_capacity_assignment(
+                active,
+                oracle.suitability,
+                instance.demand,
+                capacity=worker_capacity,
+            )
+            profiles.append(r.per_task_satisfaction)
+        out[int(u)] = np.mean(np.asarray(profiles, dtype=np.float64), axis=0).astype(np.float32)
+    return out
+
+
+def build_journal_embeddings(
+    instance: JournalInstance,
+    task_mode: str = 'direct',
+    mc_times: int = 20,
+    random_seed: int = 0,
+    worker_capacity: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    social = structural_social_embedding(instance.graph)
+    if task_mode == 'direct':
+        task = task_need_embedding(instance)
+    elif task_mode == 'singleton_mc':
+        task = singleton_service_embedding(
+            instance,
+            mc_times=mc_times,
+            random_seed=random_seed,
+            worker_capacity=worker_capacity,
+        )
+    else:
+        raise ValueError(f'unknown task_mode={task_mode!r}')
+    return social, task
