@@ -27,9 +27,14 @@ def load_runs(root: Path):
     runs = []
     for path in root.rglob("results.json"):
         metadata = path.with_name("metadata.json")
-        if not metadata.exists():
+        complete = path.with_name("complete.json")
+        if not metadata.exists() or not complete.exists():
             continue
-        runs.append((json.loads(metadata.read_text()), json.loads(path.read_text()), path.parent))
+        marker = json.loads(complete.read_text())
+        rows = json.loads(path.read_text())
+        if not marker.get("completed") or marker.get("rows") != len(rows):
+            continue
+        runs.append((json.loads(metadata.read_text()), rows, path.parent))
     return runs
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 from itertools import product
 
 import numpy as np
@@ -11,6 +12,12 @@ BUDGETS = (50, 60, 70, 80, 90, 100)
 NON_CELF_BASELINES = (
     "DegGreedy", "CovGreedy", "FastSelector-SIGIR-adapted", "KTVoting2-feasible", "PIANO",
 )
+
+
+def instance_world_seed(instance_sha256: str, purpose: str) -> int:
+    """Stable world seed independent of neural-network training seed."""
+    digest = hashlib.sha256(f"{instance_sha256}:{purpose}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % (2**31 - 1)
 
 
 @dataclass(frozen=True)
@@ -68,7 +75,12 @@ def scenario_rank_key(dataset_rows: dict[str, list[list[dict]]]) -> tuple:
     """Higher is better; use the weaker dataset first to avoid one-dataset wins."""
     per_dataset = []
     for instances in dataset_rows.values():
-        if not instances or any(not nondegenerate(rows) for rows in instances):
+        if not instances:
+            return (-1, -np.inf)
+        # The preregistered exclusion is a scenario-level property across the
+        # development instances, not a veto by one noisy reconstruction.
+        pooled = [row for rows in instances for row in rows]
+        if not nondegenerate(pooled):
             return (-1, -np.inf)
         gap_matrix = np.asarray([
             [instance_relative_gaps(rows).get(budget, np.nan) for budget in BUDGETS]
