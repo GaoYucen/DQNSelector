@@ -2,6 +2,7 @@ import networkx as nx
 import numpy as np
 import torch
 
+from dqnselector.baselines import celf, greedy_by_marginal_gain
 from dqnselector.paper_baselines import fast_selector, kt_voting, kt_voting_grouped
 from dqnselector.piano import PianoQNet, piano_select, train_piano
 
@@ -42,6 +43,14 @@ def test_fast_selector_uses_average_ranks_and_dynamic_similarity():
     profiles = np.array([[1, 0], [1, 0], [0, 1]], dtype=float)
     # First selection resolves tied degree deterministically; the second prefers the dissimilar profile.
     assert fast_selector(g, profiles, [0, 1, 2], 2, alpha=.1) == [0, 2]
+
+
+def test_celf_matches_eager_greedy_on_fixed_submodular_oracle():
+    values = {0: {0, 1}, 1: {1, 2}, 2: {3}}
+    def gain(selected, candidate):
+        covered = set().union(*(values[v] for v in selected)) if selected else set()
+        return len(values[candidate] - covered)
+    assert celf([0, 1, 2], 3, gain) == greedy_by_marginal_gain([0, 1, 2], 3, gain)
 
 
 def test_piano_matches_explicit_paper_equations_and_batching():
