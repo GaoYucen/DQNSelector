@@ -43,6 +43,8 @@ class ScientificV2ReconstructionConfig:
     structure_seed: int = 2024
     task_seed: int = 2024
     bidirectional_edges: bool = True
+    graph_sampling: str = "uniform_induced"
+    worker_pool_policy: str = "nonisolated_uniform"
     participation_distance_quantile: float = 0.50
     quality_mode: str = "uniform"
     quality_floor: float = 0.25
@@ -72,6 +74,10 @@ def _validate_config(cfg: ScientificV2ReconstructionConfig) -> None:
         raise ValueError("demand_floor_ratio must lie in (0,1]")
     if cfg.target_sampling not in {"active_uniform", "active_weighted", "all_uniform"}:
         raise ValueError("unknown target_sampling")
+    if cfg.graph_sampling not in {"uniform_induced", "community_bfs"}:
+        raise ValueError("graph_sampling must be 'uniform_induced' or 'community_bfs'")
+    if cfg.worker_pool_policy not in {"all_uniform", "nonisolated_uniform"}:
+        raise ValueError("unknown worker_pool_policy")
     if not cfg.trivalency_values or any(not (0.0 <= p <= 1.0) for p in cfg.trivalency_values):
         raise ValueError("trivalency probabilities must lie in [0,1]")
 
@@ -209,6 +215,37 @@ def _graph_diagnostics(graph: nx.DiGraph) -> dict[str, float | int]:
     }
 
 
+def _sample_community_bfs(
+    source_edges: list[tuple[int, int]], eligible: np.ndarray, n_users: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample a connected, region-local social community with randomized BFS order."""
+    eligible_set = set(int(v) for v in eligible.tolist())
+    graph = nx.Graph()
+    graph.add_nodes_from(eligible_set)
+    graph.add_edges_from((u, v) for u, v in source_edges if u in eligible_set and v in eligible_set)
+    eligible_components = [sorted(component) for component in nx.connected_components(graph) if len(component) >= n_users]
+    if not eligible_components:
+        raise ValueError("no region social component is large enough for community_bfs sampling")
+    weights = np.asarray([len(component) for component in eligible_components], dtype=np.float64)
+    component = eligible_components[int(rng.choice(len(eligible_components), p=weights / weights.sum()))]
+    root = int(rng.choice(component))
+    component_set = set(component)
+    chosen: list[int] = []
+    seen = {root}
+    queue = [root]
+    while queue and len(chosen) < n_users:
+        node = queue.pop(0)
+        chosen.append(node)
+        neighbors = [v for v in graph.neighbors(node) if v in component_set and v not in seen]
+        rng.shuffle(neighbors)
+        seen.update(neighbors)
+        queue.extend(neighbors)
+    if len(chosen) != n_users:
+        raise RuntimeError("community BFS terminated before reaching requested user count")
+    return np.asarray(chosen, dtype=np.int64)
+
+
 def reconstruct_scientific_v2_instance(
     edge_path: str | Path,
     checkin_path: str | Path,
@@ -222,7 +259,10 @@ def reconstruct_scientific_v2_instance(
     eligible = np.asarray(sorted(edge_nodes & region_users), dtype=np.int64)
     if eligible.size < cfg.n_users:
         raise ValueError(f"only {eligible.size} region-eligible users, need {cfg.n_users}")
-    sampled_original = structure_rng.choice(eligible, size=cfg.n_users, replace=False)
+    if cfg.graph_sampling == "uniform_induced":
+        sampled_original = structure_rng.choice(eligible, size=cfg.n_users, replace=False)
+    else:
+        sampled_original = _sample_community_bfs(source_edges, eligible, cfg.n_users, structure_rng)
     sampled_set = set(int(x) for x in sampled_original.tolist())
     locs = _collect_user_locations(checkin_path, sampled_set, cfg)
     if any(len(locs[u]) == 0 for u in sampled_set):
@@ -261,9 +301,15 @@ def reconstruct_scientific_v2_instance(
         if cfg.bidirectional_edges:
             graph.add_edge(v, u, weight=float(structure_rng.choice(tri)))
     pool_size = min(cfg.worker_pool_size, n)
-    worker_pool = set(
-        int(x) for x in structure_rng.choice(n, size=pool_size, replace=False).tolist()
-    )
+    if cfg.worker_pool_policy == "all_uniform":
+        pool_candidates = np.arange(n, dtype=np.int64)
+    else:
+        pool_candidates = np.asarray([node for node in range(n) if graph.degree(node) > 0], dtype=np.int64)
+        if pool_candidates.size < pool_size:
+            raise ValueError(
+                f"only {pool_candidates.size} nonisolated users for worker pool of {pool_size}"
+            )
+    worker_pool = set(int(x) for x in structure_rng.choice(pool_candidates, size=pool_size, replace=False).tolist())
     demand, demand_info = _load_calibrated_demand(
         selected_counts, contribution, worker_pool, cfg
     )
@@ -287,6 +333,8 @@ def reconstruct_scientific_v2_instance(
         "target_checkin_counts": selected_counts.tolist(),
         "retained_source_edges": retained_source_edges,
         "directed_edges_after_conversion": graph.number_of_edges(),
+        "graph_sampling": cfg.graph_sampling,
+        "worker_pool_policy": cfg.worker_pool_policy,
         "worker_pool": sorted(worker_pool),
         "participation": {
             "proxy": "mean historical exp(-haversine_distance_km/tau_km)",

@@ -47,6 +47,8 @@ def parse_args():
         "--trivalency-values", type=float, nargs="+", default=[0.001, 0.01, 0.10]
     )
     p.add_argument("--directed-source", action="store_true")
+    p.add_argument("--graph-sampling", choices=["uniform_induced", "community_bfs"], default="uniform_induced")
+    p.add_argument("--worker-pool-policy", choices=["all_uniform", "nonisolated_uniform"], default="nonisolated_uniform")
     return p.parse_args()
 
 
@@ -61,6 +63,8 @@ def main():
         structure_seed=a.structure_seed,
         task_seed=a.task_seed,
         bidirectional_edges=not a.directed_source,
+        graph_sampling=a.graph_sampling,
+        worker_pool_policy=a.worker_pool_policy,
         participation_distance_quantile=a.participation_quantile,
         quality_mode=a.quality_mode,
         quality_floor=a.quality_floor,

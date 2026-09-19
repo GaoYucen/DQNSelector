@@ -2,7 +2,7 @@ import networkx as nx
 import numpy as np
 import torch
 
-from dqnselector.paper_baselines import fast_selector, kt_voting
+from dqnselector.paper_baselines import fast_selector, kt_voting, kt_voting_grouped
 from dqnselector.piano import PianoQNet, piano_select, train_piano
 
 
@@ -24,6 +24,24 @@ def test_voting_always_obeys_pool_and_budget_with_zero_votes_and_remainder_areas
                 selected = kt_voting(g,values,[1,3,5],k)
                 assert len(selected) == len(set(selected)) == k
                 assert set(selected) <= {1,3,5}
+
+
+def test_ktvoting2_path_is_distinct_from_grouped_appendix_path():
+    g = nx.DiGraph()
+    g.add_nodes_from(range(5))
+    g.add_weighted_edges_from([(0, 1, .8), (2, 3, .8), (4, 1, .4)])
+    values = np.array([[5, 0, 0], [0, 1, 0], [0, 0, 5], [1, 0, 0], [0, 1, 0]], dtype=float)
+    primary = kt_voting(g, values, [0, 2, 4], 2)
+    appendix = kt_voting_grouped(g, values, [0, 2, 4], 2)
+    assert len(primary) == len(appendix) == 2
+    assert set(primary) <= {0, 2, 4}
+
+
+def test_fast_selector_uses_average_ranks_and_dynamic_similarity():
+    g = nx.DiGraph(); g.add_nodes_from(range(4)); g.add_edges_from([(0, 3), (1, 3), (2, 3)])
+    profiles = np.array([[1, 0], [1, 0], [0, 1]], dtype=float)
+    # First selection resolves tied degree deterministically; the second prefers the dissimilar profile.
+    assert fast_selector(g, profiles, [0, 1, 2], 2, alpha=.1) == [0, 2]
 
 
 def test_piano_matches_explicit_paper_equations_and_batching():

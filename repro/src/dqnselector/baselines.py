@@ -9,7 +9,8 @@ import numpy as np
 
 def degree_greedy(graph: nx.DiGraph, k: int, worker_pool: Iterable[int] | None = None) -> list[int]:
     pool = list(graph.nodes() if worker_pool is None else worker_pool)
-    pool.sort(key=lambda v: (graph.out_degree(v), -int(v)), reverse=True)
+    degree = graph.out_degree if graph.is_directed() else graph.degree
+    pool.sort(key=lambda v: (degree(v), -int(v)), reverse=True)
     return pool[:k]
 
 

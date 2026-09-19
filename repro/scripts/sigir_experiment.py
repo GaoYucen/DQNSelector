@@ -19,7 +19,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'repro/src'))
 from dqnselector.baselines import celf, degree_greedy, one_step_coverage_greedy
-from dqnselector.paper_baselines import mobility_profiles, fast_selector, kt_voting
+from dqnselector.paper_baselines import mobility_profiles, fast_selector, kt_voting, load_mobility_profiles, save_mobility_profiles
 from dqnselector.piano import PianoQNet, piano_select, train_piano
 from dqnselector.reconstruction import load_reconstruction
 from dqnselector.oracle import LiveEdgeECOracle
@@ -67,9 +67,14 @@ def prepare(ds,n):
     inst,manifest=load_reconstruction(instance)
     pool=sorted(inst.worker_pool)
     profile_file=emb.parent/'mobility_profiles.npz'
-    if not profile_file.exists():
+    try:
+        if profile_file.exists():
+            load_mobility_profiles(profile_file, pool)
+        else:
+            raise ValueError("missing profile cache")
+    except (ValueError, KeyError):
         profiles=mobility_profiles(raw/f'loc-{ds}_totalCheckins.txt.gz',manifest,pool)
-        np.savez_compressed(profile_file,profiles=profiles,pool=np.asarray(pool))
+        save_mobility_profiles(profile_file, profiles, pool)
     print(f'PREPARED {ds} n={n} instance={instance} embeddings={emb}',flush=True)
 
 
@@ -170,10 +175,9 @@ def main():
         baseline=json.loads(baseline_file.read_text())
     else:
         baseline={}
-        profiles=np.load(emb_path.parent/'mobility_profiles.npz')
-        assert profiles['pool'].tolist()==pool
+        profiles=load_mobility_profiles(emb_path.parent/'mobility_profiles.npz', pool)
         selection=LiveEdgeECOracle(inst,mc_times=100,random_seed=2024+17)
-        for name in ['DegGreedy','CovGreedy','FastSelector','KTVoting','CELF']:
+        for name in ['DegGreedy','CovGreedy','FastSelector-SIGIR-adapted','KTVoting2-feasible','CELF']:
             orders,times={},{}
             for k in BUDGETS:
                 if name=='CELF':
@@ -181,8 +185,8 @@ def main():
                 start=time.perf_counter()
                 if name=='DegGreedy': chosen=degree_greedy(inst.graph,k,pool)
                 elif name=='CovGreedy': chosen=one_step_coverage_greedy(inst.graph,inst.participation*inst.quality,k,inst.nodes,pool)
-                elif name=='FastSelector': chosen=fast_selector(inst.graph,profiles['profiles'],pool,k,.56 if a.dataset=='gowalla' else .64)
-                elif name=='KTVoting': chosen=kt_voting(inst.graph,inst.participation*inst.quality,pool,k)
+                elif name=='FastSelector-SIGIR-adapted': chosen=fast_selector(inst.graph,profiles,pool,k,.56 if a.dataset=='gowalla' else .64)
+                elif name=='KTVoting2-feasible': chosen=kt_voting(inst.graph,inst.participation*inst.quality,pool,k)
                 else: chosen=celf(pool,k,selection.marginal_gain)
                 times[k]=time.perf_counter()-start
                 orders[k]=chosen

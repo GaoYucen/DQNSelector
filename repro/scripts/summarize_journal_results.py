@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Freeze a development scenario and test the journal acceptance criterion."""
+from __future__ import annotations
+
+import argparse
+import json
+from collections import defaultdict
+from pathlib import Path
+import sys
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "repro" / "src"))
+from dqnselector.journal_protocol import BUDGETS, instance_relative_gaps, scenario_rank_key, simultaneous_bootstrap
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", required=True, help="directory containing per-run results.json files")
+    parser.add_argument("--phase", choices=["development", "test"], required=True)
+    parser.add_argument("--output", required=True)
+    return parser.parse_args()
+
+
+def load_runs(root: Path):
+    runs = []
+    for path in root.rglob("results.json"):
+        metadata = path.with_name("metadata.json")
+        if not metadata.exists():
+            continue
+        runs.append((json.loads(metadata.read_text()), json.loads(path.read_text()), path.parent))
+    return runs
+
+
+def main():
+    args = parse_args(); root = Path(args.root)
+    runs = load_runs(root)
+    by_scenario: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for metadata, rows, _ in runs:
+        scenario = metadata.get("manifest", {}).get("scenario_id", "missing")
+        dataset = f'{metadata["dataset"]}-{metadata["users"]}'
+        by_scenario[scenario][dataset].extend(rows)
+    if args.phase == "development":
+        ranked = sorted(((scenario_rank_key(datasets), scenario) for scenario, datasets in by_scenario.items()), reverse=True)
+        result = {"phase": "development", "ranking": [{"scenario_id": scenario, "rank_key": key} for key, scenario in ranked],
+                  "frozen_primary": ranked[0][1] if ranked else None}
+    else:
+        grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for metadata, rows, _ in runs:
+            scenario = metadata.get("manifest", {}).get("scenario_id", "missing")
+            dataset = f'{metadata["dataset"]}-{metadata["users"]}'
+            grouped[(scenario, dataset)].append(rows)
+        reports = []
+        for (scenario, dataset), instances in grouped.items():
+            gaps = np.asarray([[instance_relative_gaps(rows).get(k, np.nan) for k in BUDGETS] for rows in instances])
+            valid = gaps[~np.isnan(gaps).any(axis=1)]
+            lower, upper = simultaneous_bootstrap(valid, seed=20260919)
+            means = valid.mean(0)
+            reports.append({"scenario_id": scenario, "dataset": dataset, "instances": int(valid.shape[0]), "budgets": list(BUDGETS),
+                            "mean_relative_gap": means.tolist(), "simultaneous_ci_lower": lower.tolist(), "simultaneous_ci_upper": upper.tolist(),
+                            "accepted_budget_count": int(np.sum((means >= .05) & (lower > 0))),
+                            "passes": bool(np.sum((means >= .05) & (lower > 0)) >= 4)})
+        result = {"phase": "test", "reports": reports, "passes_all_dataset_groups": bool(reports) and all(report["passes"] for report in reports)}
+    Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

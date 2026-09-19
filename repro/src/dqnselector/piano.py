@@ -17,6 +17,36 @@ from torch import nn
 from .rainbow import NStepAccumulator, Transition
 
 
+def sample_piano_subgraph(graph, max_nodes: int, seed: int, roots=None):
+    """Public-repository-compatible connected BFS subgraph sampler.
+
+    PIANO trains on connected graph samples and transfers only trainable
+    parameters to the full deployment graph.  The returned graph is relabelled
+    densely and carries ``original_node_ids`` for reward adapters.
+    """
+    import networkx as nx
+    if max_nodes <= 0:
+        raise ValueError("max_nodes must be positive")
+    rng = np.random.default_rng(seed)
+    undirected = graph.to_undirected()
+    components = [component for component in nx.connected_components(undirected) if component]
+    if not components:
+        return nx.DiGraph(), []
+    component = components[int(rng.integers(len(components)))]
+    valid_roots = sorted(set(component) & set(roots or component))
+    root = int(rng.choice(np.asarray(valid_roots or sorted(component), dtype=np.int64)))
+    queue, seen, nodes = [root], {root}, []
+    while queue and len(nodes) < max_nodes:
+        node = queue.pop(0); nodes.append(node)
+        neighbors = list(undirected.neighbors(node)); rng.shuffle(neighbors)
+        for neighbor in neighbors:
+            if neighbor in component and neighbor not in seen:
+                seen.add(neighbor); queue.append(neighbor)
+    sampled = graph.subgraph(nodes).copy()
+    mapping = {node: index for index, node in enumerate(nodes)}
+    return nx.relabel_nodes(sampled, mapping, copy=True), nodes
+
+
 class PianoQNet(nn.Module):
     def __init__(self, graph, worker_pool, dim=64, rounds=4):
         super().__init__()
@@ -80,7 +110,7 @@ def piano_select(model, k, device='cpu'):
 def train_piano(model, reward_fn, episodes=200, budget=50, seed=2024, device='cuda',
                 learning_rate=.001, gamma=.95, n_step=5, batch_size=64,
                 target_update=100, replay_capacity=10000, progress=None,
-                exploration_steps=10000, lr_decay_interval=1000):
+                exploration_steps=10000, lr_decay_interval=1000, progress_interval=1):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     model = model.to(device)
@@ -143,9 +173,63 @@ def train_piano(model, reward_fn, episodes=200, budget=50, seed=2024, device='cu
                 if updates % target_update == 0:
                     target.load_state_dict(model.state_dict())
         trace.append(total)
-        if progress is not None and ((episode + 1) % 10 == 0 or episode == 0):
+        if progress is not None and ((episode + 1) % max(1, progress_interval) == 0 or episode == 0):
             progress(episode + 1, total, time.perf_counter() - start)
     return model, dict(episode_returns=trace,updates=updates,transitions=episodes*budget,
                        training_seconds=time.perf_counter()-start,seed=seed,
                        exploration_steps=exploration_steps,final_epsilon=epsilon,
                        lr_decay_interval=lr_decay_interval,final_learning_rate=optimizer.param_groups[0]['lr'])
+
+
+def train_piano_on_subgraphs(full_model, full_graph, worker_pool, reward_fn, episodes=100,
+                             budget=50, subgraph_nodes=1024, games_per_subgraph=2,
+                             seed=2024, device='cuda', progress=None):
+    """Train paper-equation PIANO on BFS samples and transfer parameters to full graph.
+
+    The public implementation rotates connected BFS samples during training.  Its
+    C++ replay memory stores a graph with every transition; this compact PyTorch
+    adapter instead keeps replay local to each sampled graph, while transferring
+    only named trainable parameters back to the deployment model.  The adapter is
+    deliberately recorded by callers and never presented as byte-identical code.
+    """
+    full_pool = set(int(v) for v in worker_pool)
+    total_updates = total_transitions = 0
+    returns: list[float] = []
+    start = time.perf_counter()
+    for episode in range(episodes):
+        graph, original_nodes = sample_piano_subgraph(
+            full_graph, subgraph_nodes, seed + episode, roots=full_pool
+        )
+        original_pool = [node for node in original_nodes if node in full_pool]
+        if len(original_pool) < 2:
+            continue
+        remap = {node: position for position, node in enumerate(original_nodes)}
+        local_pool = [remap[node] for node in original_pool]
+        local_budget = min(int(budget), len(local_pool))
+        local = PianoQNet(graph, local_pool, dim=full_model.alpha3.numel(), rounds=full_model.rounds)
+        local_params = dict(local.named_parameters())
+        with torch.no_grad():
+            for name, parameter in full_model.named_parameters():
+                local_params[name].copy_(parameter.detach().cpu())
+
+        def local_reward(selected, candidate):
+            selected_original = {original_nodes[v] for v in selected}
+            return float(reward_fn(selected_original, original_nodes[int(candidate)]))
+
+        local, stats = train_piano(
+            local, local_reward, episodes=games_per_subgraph, budget=local_budget,
+            seed=seed + episode, device=device, progress_interval=games_per_subgraph + 1,
+        )
+        with torch.no_grad():
+            trained = dict(local.named_parameters())
+            for name, parameter in full_model.named_parameters():
+                parameter.copy_(trained[name].detach().to(parameter.device))
+        total_updates += int(stats["updates"])
+        total_transitions += int(stats["transitions"])
+        returns.extend(stats["episode_returns"])
+        if progress is not None:
+            progress(episode + 1, float(np.mean(stats["episode_returns"])), time.perf_counter() - start)
+    return full_model, {"episode_returns": returns, "updates": total_updates, "transitions": total_transitions,
+                        "training_seconds": time.perf_counter() - start, "seed": seed,
+                        "subgraph_nodes": subgraph_nodes, "games_per_subgraph": games_per_subgraph,
+                        "adapter": "BFS-subgraph parameter-transfer with local replay"}
