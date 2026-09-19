@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument("--ranking-temperature", type=float, default=.1)
     parser.add_argument("--piano-episodes", type=int, default=200)
     parser.add_argument("--evaluation-mc", type=int, default=2000)
+    parser.add_argument("--timing-repeats", type=int, default=30)
     parser.add_argument("--run-ablations", action="store_true")
     return parser.parse_args()
 
@@ -124,9 +125,11 @@ def main():
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     instance_path, embedding_path, checkin_path = Path(args.instance), Path(args.embeddings), Path(args.checkins)
     instance_sha, embedding_sha, checkin_sha = file_hash(instance_path / "instance.npz"), file_hash(embedding_path), file_hash(checkin_path)
+    if args.timing_repeats <= 0:
+        raise ValueError("--timing-repeats must be positive")
     config = {**vars(args), "instance_sha256": instance_sha, "embedding_sha256": embedding_sha,
               "checkin_sha256": checkin_sha, "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-              "budgets": list(BUDGETS), "selection_mc": 300, "validation_mc": 500, "selection_timing_repeats": 30}
+              "budgets": list(BUDGETS), "selection_mc": 300, "validation_mc": 500, "selection_timing_repeats": args.timing_repeats}
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode("utf-8")).hexdigest()
     expected_rows = (5 if args.role == "baseline" else 3 + (2 if args.run_ablations else 0)) * len(BUDGETS)
     if complete(out, config_hash, expected_rows):
@@ -136,6 +139,7 @@ def main():
     inst, manifest = load_reconstruction(instance_path)
     emb = np.load(embedding_path)
     pool = set(inst.worker_pool or set())
+    pool_list = sorted(pool)
     if max(BUDGETS) > len(pool):
         raise ValueError("worker pool is too small for journal budgets")
     final_seed = instance_world_seed(instance_sha, f"evaluation-{args.evaluation_mc}")
@@ -152,23 +156,23 @@ def main():
                          "selection_seconds_median": times[budget], **(extra or {})})
 
     if args.role == "baseline":
-        start = time.perf_counter(); profiles = mobility_profiles(checkin_path, manifest, sorted(pool)); timing["mobility_preprocess_seconds"] = time.perf_counter() - start
+        start = time.perf_counter(); profiles = mobility_profiles(checkin_path, manifest, pool_list); timing["mobility_preprocess_seconds"] = time.perf_counter() - start
         selection = LiveEdgeECOracle(inst, mc_times=300, random_seed=selection_seed)
         direct = inst.participation * inst.quality
         specs = {
-            "DegGreedy": lambda k: degree_greedy(inst.graph, k, pool),
-            "CovGreedy": lambda k: one_step_coverage_greedy(inst.graph, direct, k, inst.nodes, pool),
-            "FastSelector-SIGIR-adapted": lambda k: fast_selector(inst.graph, profiles, pool, k, .56 if manifest["config"]["dataset_name"] == "gowalla" else .64),
-            "KTVoting2-feasible": lambda k: kt_voting(inst.graph, direct, pool, k),
-            "CELF": lambda k: celf(pool, k, selection.marginal_gain),
+            "DegGreedy": lambda k: degree_greedy(inst.graph, k, pool_list),
+            "CovGreedy": lambda k: one_step_coverage_greedy(inst.graph, direct, k, inst.nodes, pool_list),
+            "FastSelector-SIGIR-adapted": lambda k: fast_selector(inst.graph, profiles, pool_list, k, .56 if manifest["config"]["dataset_name"] == "gowalla" else .64),
+            "KTVoting2-feasible": lambda k: kt_voting(inst.graph, direct, pool_list, k),
+            "CELF": lambda k: celf(pool_list, k, selection.marginal_gain),
         }
         for method, select in specs.items():
             if method == "CELF":
                 def clear_then_select(k, _select=select):
                     selection.clear_score_cache(); return _select(k)
-                orders, times = time_per_budget(clear_then_select, args.device)
+                orders, times = time_per_budget(clear_then_select, args.device, args.timing_repeats)
             else:
-                orders, times = time_per_budget(select, args.device)
+                orders, times = time_per_budget(select, args.device, args.timing_repeats)
             record(method, orders, times, {"implementation": "journal-repaired-v1"})
     else:
         seed = int(args.training_seed)
@@ -181,12 +185,12 @@ def main():
         old_path = out / "dqnselector-frozen.pt"; torch.save(old.state_dict(), old_path)
         start = time.perf_counter(); old_loaded = RainbowSelector(emb["social_s"], emb["coverage_r"], worker_pool=pool).to(args.device)
         old_loaded.load_state_dict(torch.load(old_path, map_location=args.device, weights_only=True)); synchronize(args.device); timing["dqn_model_load_seconds"] = time.perf_counter() - start
-        old_orders, old_times = time_per_budget(lambda k: greedy_select(old_loaded, k, args.device), args.device)
+        old_orders, old_times = time_per_budget(lambda k: greedy_select(old_loaded, k, args.device), args.device, args.timing_repeats)
         record("DQNSelector", old_orders, old_times, {"training_updates": len(old_stats.losses), "checkpoint_version": "frozen-v3"})
 
         start = time.perf_counter(); footprint = objective_aware_coverage_embedding(inst, influence_range=2, include_direct=True).astype(np.float32); timing["journal_preprocess_seconds"] = time.perf_counter() - start
-        teacher_celf = celf(pool, max(BUDGETS), train.marginal_gain)
-        start = time.perf_counter(); teachers = build_teacher_states(train, pool, BUDGETS, [teacher_celf, old_orders[max(BUDGETS)], np.random.default_rng(seed + 17).permutation(sorted(pool)).tolist()]); timing["teacher_label_seconds"] = time.perf_counter() - start
+        teacher_celf = celf(pool_list, max(BUDGETS), train.marginal_gain)
+        start = time.perf_counter(); teachers = build_teacher_states(train, pool_list, BUDGETS, [teacher_celf, old_orders[max(BUDGETS)], np.random.default_rng(seed + 17).permutation(pool_list).tolist()]); timing["teacher_label_seconds"] = time.perf_counter() - start
 
         def run_journal(method: str, residual_state: bool, ranking_weight: float):
             torch.manual_seed(seed); np.random.seed(seed)
@@ -196,7 +200,7 @@ def main():
             checkpoint = out / f"{method.lower()}.pt"; torch.save(model.state_dict(), checkpoint)
             start = time.perf_counter(); loaded = JournalSelector(emb["social_s"], footprint, pool, hidden_dim=args.journal_hidden, use_residual_state=residual_state).to(args.device)
             loaded.load_state_dict(torch.load(checkpoint, map_location=args.device, weights_only=True)); synchronize(args.device); load_seconds = time.perf_counter() - start
-            j_orders, j_times = time_per_budget(lambda k: journal_greedy_select(loaded, k, args.device), args.device)
+            j_orders, j_times = time_per_budget(lambda k: journal_greedy_select(loaded, k, args.device), args.device, args.timing_repeats)
             record(method, j_orders, j_times, {"training_seconds": train_seconds, "model_load_seconds": load_seconds, "training_updates": stats["updates"], "checkpoint_version": loaded.checkpoint_version})
 
         run_journal("DQNSelector-J", True, args.ranking_weight)
@@ -217,7 +221,7 @@ def main():
         checkpoints["final"] = {key: value.detach().cpu().clone() for key, value in piano.state_dict().items()}
         for name, state in checkpoints.items(): torch.save(state, out / f"piano-{name}.pt")
         piano.load_state_dict(checkpoints[best[1]])
-        piano_orders, piano_times = time_per_budget(lambda k: piano_select(piano, k, args.device), args.device)
+        piano_orders, piano_times = time_per_budget(lambda k: piano_select(piano, k, args.device), args.device, args.timing_repeats)
         record("PIANO", piano_orders, piano_times, {"training_updates": piano_stats["updates"], "checkpoint": best[1], "validation_macro_ec": best[0], "implementation": "paper-equation-v1"})
 
     metadata = {"config": config, "config_hash": config_hash, "dataset": manifest["config"]["dataset_name"], "users": inst.graph.number_of_nodes(), "instance_sha256": instance_sha, "embedding_sha256": embedding_sha, "checkin_sha256": checkin_sha, "manifest": manifest.get("journal_scenario", {}), "timing": timing, "worlds": {"final": {"mc": args.evaluation_mc, "seed": final_seed}, "selection": {"mc": 300, "seed": selection_seed}, "validation": {"mc": 500, "seed": validation_seed}, "train": {"mc": 100, "seed": args.training_seed}}}

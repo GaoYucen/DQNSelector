@@ -130,7 +130,7 @@ def _average_rank(values: np.ndarray, lower_is_better: bool) -> np.ndarray:
 
 
 def fast_selector(graph, profiles: np.ndarray | SparseMobilityProfiles, pool: list[int], k: int, alpha: float) -> list[int]:
-    pool = np.asarray(pool, dtype=int)
+    pool = np.asarray(sorted(int(v) for v in pool), dtype=int)
     if not 0 <= alpha <= 1:
         raise ValueError('invalid profiles or alpha')
     sparse = isinstance(profiles, SparseMobilityProfiles)

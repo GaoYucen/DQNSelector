@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--structure-seed", type=int, required=True)
     parser.add_argument("--task-seed", type=int, required=True)
     parser.add_argument("--scenario", help="optional frozen scenario id")
+    parser.add_argument("--allow-unavailable", action="store_true")
     return parser.parse_args()
 
 
@@ -43,7 +44,20 @@ def main():
             trivalency_values=scenario.trivalency_values, quality_mode=scenario.quality_mode,
             load_factor=scenario.load_factor, target_sampling="active_uniform",
         )
-        instance, manifest = reconstruct_scientific_v2_instance(args.edges, args.checkins, cfg)
+        try:
+            instance, manifest = reconstruct_scientific_v2_instance(args.edges, args.checkins, cfg)
+        except ValueError as error:
+            unavailable = "nonisolated users" in str(error) or "no region social component" in str(error)
+            if not args.allow_unavailable or not unavailable:
+                raise
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "unavailable.json").write_text(json.dumps({
+                "dataset": args.dataset, "users": args.users,
+                "structure_seed": args.structure_seed, "task_seed": args.task_seed,
+                "scenario_id": scenario.scenario_id, "reason": str(error),
+            }, indent=2), encoding="utf-8")
+            built.append({"scenario_id": scenario.scenario_id, "output": str(output), "unavailable": True})
+            continue
         manifest["journal_scenario"] = scenario.as_manifest()
         manifest.setdefault("notes", []).append("Frozen journal scenario grid; not selected using final test results.")
         save_reconstruction(instance, manifest, output)

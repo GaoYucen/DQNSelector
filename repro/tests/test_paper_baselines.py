@@ -45,6 +45,12 @@ def test_fast_selector_uses_average_ranks_and_dynamic_similarity():
     assert fast_selector(g, profiles, [0, 1, 2], 2, alpha=.1) == [0, 2]
 
 
+def test_fast_selector_accepts_an_unordered_candidate_pool():
+    g = nx.DiGraph(); g.add_nodes_from(range(4)); g.add_edges_from([(0, 3), (1, 3), (2, 3)])
+    profiles = np.array([[1, 0], [1, 0], [0, 1]], dtype=float)
+    assert fast_selector(g, profiles, {0, 1, 2}, 2, alpha=.1) == [0, 2]
+
+
 def test_celf_matches_eager_greedy_on_fixed_submodular_oracle():
     values = {0: {0, 1}, 1: {1, 2}, 2: {3}}
     def gain(selected, candidate):
