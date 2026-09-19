@@ -33,34 +33,60 @@ def load_runs(root: Path):
     return runs
 
 
+def average_training_seeds(runs: list[tuple[dict, list[dict], Path]]):
+    """Average learned-model seeds before treating a reconstruction as an instance.
+
+    Baselines are deterministically repeated in every run; averaging all methods
+    makes an accidental seed-dependent baseline implementation visible while
+    preserving the planned three-seed estimate for learned methods.
+    """
+    grouped: dict[tuple[str, str, str], list[tuple[dict, list[dict], Path]]] = defaultdict(list)
+    for metadata, rows, path in runs:
+        scenario = metadata.get("manifest", {}).get("scenario_id", "missing")
+        dataset = f'{metadata["dataset"]}-{metadata["users"]}'
+        grouped[(scenario, dataset, metadata["instance_sha256"])].append((metadata, rows, path))
+    result = []
+    for (scenario, dataset, instance_hash), trials in grouped.items():
+        values: dict[tuple[str, int], list[float]] = defaultdict(list)
+        for _, rows, _ in trials:
+            for row in rows:
+                values[(row["method"], int(row["k"]))].append(float(row["ec"]))
+        averaged = [
+            {"method": method, "k": budget, "ec": float(np.mean(ec))}
+            for (method, budget), ec in sorted(values.items())
+        ]
+        result.append((scenario, dataset, instance_hash, averaged, len(trials)))
+    return result
+
+
 def main():
     args = parse_args(); root = Path(args.root)
     runs = load_runs(root)
-    by_scenario: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
-    for metadata, rows, _ in runs:
-        scenario = metadata.get("manifest", {}).get("scenario_id", "missing")
-        dataset = f'{metadata["dataset"]}-{metadata["users"]}'
-        by_scenario[scenario][dataset].extend(rows)
+    instances = average_training_seeds(runs)
+    by_scenario: dict[str, dict[str, list[list[dict]]]] = defaultdict(lambda: defaultdict(list))
+    for scenario, dataset, _, rows, _ in instances:
+        by_scenario[scenario][dataset].append(rows)
     if args.phase == "development":
-        ranked = sorted(((scenario_rank_key(datasets), scenario) for scenario, datasets in by_scenario.items()), reverse=True)
+        ranked = []
+        for scenario, datasets in by_scenario.items():
+            ranked.append((scenario_rank_key(datasets), scenario))
+        ranked.sort(reverse=True)
         result = {"phase": "development", "ranking": [{"scenario_id": scenario, "rank_key": key} for key, scenario in ranked],
                   "frozen_primary": ranked[0][1] if ranked else None}
     else:
-        grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        for metadata, rows, _ in runs:
-            scenario = metadata.get("manifest", {}).get("scenario_id", "missing")
-            dataset = f'{metadata["dataset"]}-{metadata["users"]}'
-            grouped[(scenario, dataset)].append(rows)
         reports = []
-        for (scenario, dataset), instances in grouped.items():
-            gaps = np.asarray([[instance_relative_gaps(rows).get(k, np.nan) for k in BUDGETS] for rows in instances])
-            valid = gaps[~np.isnan(gaps).any(axis=1)]
-            lower, upper = simultaneous_bootstrap(valid, seed=20260919)
-            means = valid.mean(0)
-            reports.append({"scenario_id": scenario, "dataset": dataset, "instances": int(valid.shape[0]), "budgets": list(BUDGETS),
-                            "mean_relative_gap": means.tolist(), "simultaneous_ci_lower": lower.tolist(), "simultaneous_ci_upper": upper.tolist(),
-                            "accepted_budget_count": int(np.sum((means >= .05) & (lower > 0))),
-                            "passes": bool(np.sum((means >= .05) & (lower > 0)) >= 4)})
+        for scenario, datasets in by_scenario.items():
+            for dataset, dataset_instances in datasets.items():
+                gaps = np.asarray([[instance_relative_gaps(rows).get(k, np.nan) for k in BUDGETS] for rows in dataset_instances])
+                valid = gaps[~np.isnan(gaps).any(axis=1)]
+                if valid.shape[0] < 2:
+                    raise ValueError(f"{scenario}/{dataset} needs at least two complete paired instances")
+                lower, upper = simultaneous_bootstrap(valid, seed=20260919)
+                means = valid.mean(0)
+                reports.append({"scenario_id": scenario, "dataset": dataset, "instances": int(valid.shape[0]), "budgets": list(BUDGETS),
+                                "mean_relative_gap": means.tolist(), "simultaneous_ci_lower": lower.tolist(), "simultaneous_ci_upper": upper.tolist(),
+                                "accepted_budget_count": int(np.sum((means >= .05) & (lower > 0))),
+                                "passes": bool(np.sum((means >= .05) & (lower > 0)) >= 4)})
         result = {"phase": "test", "reports": reports, "passes_all_dataset_groups": bool(reports) and all(report["passes"] for report in reports)}
     Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

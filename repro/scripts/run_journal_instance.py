@@ -56,16 +56,19 @@ def parse_args():
     parser.add_argument("--journal-hidden", type=int, default=128)
     parser.add_argument("--ranking-weight", type=float, default=.3)
     parser.add_argument("--ranking-temperature", type=float, default=.1)
+    parser.add_argument("--run-ablations", action="store_true")
     parser.add_argument("--piano-episodes", type=int, default=200)
     parser.add_argument("--skip-piano", action="store_true")
     return parser.parse_args()
 
 
-def timed_selection(selector, budget: int, device: str, repeats: int = 30):
+def timed_selection(selector, budget: int, device: str, repeats: int = 30, reset=None):
     selector(budget)  # warmup
     elapsed = []
     order = None
     for _ in range(repeats):
+        if reset is not None:
+            reset()
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()
         start = time.perf_counter(); order = selector(budget)
@@ -99,7 +102,9 @@ def main():
                          "selection_seconds_median": selection_seconds, **(extra or {})})
 
     direct = inst.participation * inst.quality
+    preprocess_start = time.perf_counter()
     profiles = mobility_profiles(args.checkins, manifest, pool)
+    baseline_preprocess_seconds = time.perf_counter() - preprocess_start
     baseline_specs = {
         "DegGreedy": lambda: degree_greedy(inst.graph, max(BUDGETS), pool),
         "CovGreedy": lambda: one_step_coverage_greedy(inst.graph, direct, max(BUDGETS), inst.nodes, pool),
@@ -109,8 +114,10 @@ def main():
     }
     selections = {}
     for method, fn in baseline_specs.items():
-        if method == "CELF": selection.clear_score_cache()
-        order, seconds = timed_selection(lambda _k: fn(), max(BUDGETS), device)
+        reset = selection.clear_score_cache if method == "CELF" else None
+        if reset is not None:
+            reset()
+        order, seconds = timed_selection(lambda _k: fn(), max(BUDGETS), device, reset=reset)
         selections[method] = order; record(method, order, seconds, {"implementation": "repaired-v1"})
 
     # Frozen DQNSelector baseline.
@@ -126,9 +133,13 @@ def main():
     torch.save(old.state_dict(), out / "dqnselector-frozen.pt")
 
     # DQNSelector-J: footprints and teacher states use only train worlds.
+    preprocess_start = time.perf_counter()
     footprint = objective_aware_coverage_embedding(inst, influence_range=2, include_direct=True).astype(np.float32)
+    journal_preprocess_seconds = time.perf_counter() - preprocess_start
     teacher_orders = [selections["CELF"], old_order, np.random.default_rng(args.training_seed + 17).permutation(pool).tolist()]
+    teacher_start = time.perf_counter()
     teachers = build_teacher_states(train_oracle, pool, BUDGETS, teacher_orders)
+    teacher_seconds = time.perf_counter() - teacher_start
     journal = JournalSelector(emb["social_s"], footprint, pool, hidden_dim=args.journal_hidden)
     start = time.perf_counter()
     journal, journal_stats = train_journal_selector(journal, train_oracle.marginal_gain, BUDGETS, teachers,
@@ -138,6 +149,28 @@ def main():
     journal_order, journal_seconds = timed_selection(lambda k: journal_greedy_select(journal, k, device), max(BUDGETS), device)
     record("DQNSelector-J", journal_order, journal_seconds, {"training_seconds": journal_training_seconds, "checkpoint_version": journal.checkpoint_version})
     torch.save(journal.state_dict(), out / "dqnselector-j.pt")
+
+    if args.run_ablations:
+        ablations = (
+            ("DQNSelector-J-residual-only", True, 0.0),
+            ("DQNSelector-J-ranking-only", False, args.ranking_weight),
+        )
+        for method, residual_state, ranking_weight in ablations:
+            torch.manual_seed(args.training_seed); np.random.seed(args.training_seed)
+            ablation = JournalSelector(emb["social_s"], footprint, pool, hidden_dim=args.journal_hidden,
+                                       use_residual_state=residual_state)
+            start = time.perf_counter()
+            ablation, stats = train_journal_selector(
+                ablation, train_oracle.marginal_gain, BUDGETS, teachers,
+                episodes=args.journal_episodes, ranking_weight=ranking_weight,
+                ranking_temperature=args.ranking_temperature, seed=args.training_seed, device=device,
+            )
+            training_seconds = time.perf_counter() - start
+            order, seconds = timed_selection(lambda k: journal_greedy_select(ablation, k, device), max(BUDGETS), device)
+            record(method, order, seconds, {"training_seconds": training_seconds,
+                                             "checkpoint_version": ablation.checkpoint_version,
+                                             "ablation": True, "stats": stats})
+            torch.save(ablation.state_dict(), out / f"{method.lower()}.pt")
 
     if not args.skip_piano:
         torch.manual_seed(args.training_seed)
@@ -168,7 +201,10 @@ def main():
             "instance": str(instance_path.resolve()), "instance_sha256": sha256(instance_path / "instance.npz"),
             "embeddings": str(embedding_path.resolve()), "embedding_sha256": sha256(embedding_path), "training_seed": args.training_seed,
             "manifest": manifest.get("journal_scenario", {}), "budgets": BUDGETS, "train_mc": 100, "selection_mc": 300,
-            "validation_mc": 500, "final_mc": 2000, "device": device, "dqn_stats": old_stats.__dict__, "journal_stats": journal_stats}
+            "validation_mc": 500, "final_mc": 2000, "device": device, "dqn_stats": old_stats.__dict__, "journal_stats": journal_stats,
+            "timing": {"baseline_preprocess_seconds": baseline_preprocess_seconds,
+                       "journal_preprocess_seconds": journal_preprocess_seconds,
+                       "teacher_label_seconds": teacher_seconds}}
     dump(out / "metadata.json", meta); dump(out / "results.json", rows)
     with (out / "results.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=sorted({key for row in rows for key in row})); writer.writeheader(); writer.writerows(rows)

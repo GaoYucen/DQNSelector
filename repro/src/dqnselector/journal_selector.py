@@ -26,6 +26,7 @@ class JournalSelector(nn.Module):
         self, social_embedding: np.ndarray | torch.Tensor,
         footprints: np.ndarray | torch.Tensor, worker_pool: Iterable[int],
         hidden_dim: int = 128, area_dim: int = 32, atoms: int = 51,
+        use_residual_state: bool = True,
     ) -> None:
         super().__init__()
         social = torch.as_tensor(social_embedding, dtype=torch.float32)
@@ -37,6 +38,7 @@ class JournalSelector(nn.Module):
         pool = torch.zeros(social.shape[0], dtype=torch.bool)
         pool[list(worker_pool)] = True
         self.register_buffer("worker_pool_mask", pool)
+        self.use_residual_state = bool(use_residual_state)
         self.social_projection = nn.Sequential(nn.Linear(social.shape[1], area_dim), nn.ReLU())
         self.area_mlp = nn.Sequential(nn.Linear(4, area_dim), nn.ReLU(), nn.Linear(area_dim, area_dim), nn.ReLU())
         # candidate social + mean/max pooled area features
@@ -55,7 +57,7 @@ class JournalSelector(nn.Module):
         return int(self.footprints.shape[1])
 
     def candidates(self, mask: torch.Tensor) -> torch.Tensor:
-        return torch.where(self.worker_pool_mask & ~mask.to(self.worker_pool_mask.device, torch.bool))[0]
+        return torch.where(self.worker_pool_mask & ~mask.to(device=self.worker_pool_mask.device, dtype=torch.bool))[0]
 
     def _selected_social_state(self, mask: torch.Tensor, max_budget: int) -> torch.Tensor:
         social = self.social_projection(self.social_embedding)
@@ -70,10 +72,15 @@ class JournalSelector(nn.Module):
 
     def _area_action_state(self, mask: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
         footprint = self.footprints
-        accumulated = footprint[mask].sum(0) if bool(mask.any()) else torch.zeros(self.n_areas, device=footprint.device)
-        residual = (1.0 - accumulated).clamp_min(0.0)
         candidate = footprint[candidates]
-        token = torch.stack((candidate, residual.expand_as(candidate), torch.minimum(candidate, residual), torch.minimum(candidate, accumulated)), dim=-1)
+        if self.use_residual_state:
+            accumulated = footprint[mask].sum(0) if bool(mask.any()) else torch.zeros(self.n_areas, device=footprint.device)
+            residual = (1.0 - accumulated).clamp_min(0.0)
+            token = torch.stack((candidate, residual.expand_as(candidate), torch.minimum(candidate, residual), torch.minimum(candidate, accumulated)), dim=-1)
+        else:
+            # Ranking-only ablation: retain the shared policy but remove all
+            # residual-demand information from its regional state.
+            token = torch.zeros((*candidate.shape, 4), dtype=candidate.dtype, device=candidate.device)
         encoded = self.area_mlp(token)
         pooled = torch.cat((encoded.mean(1), encoded.max(1).values), dim=1)
         social = self.social_projection(self.social_embedding[candidates])

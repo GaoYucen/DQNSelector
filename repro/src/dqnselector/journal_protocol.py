@@ -64,14 +64,20 @@ def instance_relative_gaps(rows: list[dict], learned_method: str = "DQNSelector-
     return result
 
 
-def scenario_rank_key(dataset_rows: dict[str, list[dict]]) -> tuple:
+def scenario_rank_key(dataset_rows: dict[str, list[list[dict]]]) -> tuple:
     """Higher is better; use the weaker dataset first to avoid one-dataset wins."""
     per_dataset = []
-    for rows in dataset_rows.values():
-        if not nondegenerate(rows):
+    for instances in dataset_rows.values():
+        if not instances or any(not nondegenerate(rows) for rows in instances):
             return (-1, -np.inf)
-        gaps = instance_relative_gaps(rows)
-        per_dataset.append((sum(value >= .05 for value in gaps.values()), float(np.mean(list(gaps.values())))))
+        gap_matrix = np.asarray([
+            [instance_relative_gaps(rows).get(budget, np.nan) for budget in BUDGETS]
+            for rows in instances
+        ])
+        if np.isnan(gap_matrix).any():
+            return (-1, -np.inf)
+        mean_gaps = gap_matrix.mean(axis=0)
+        per_dataset.append((int(np.sum(mean_gaps >= .05)), float(np.mean(mean_gaps))))
     return (min(item[0] for item in per_dataset), min(item[1] for item in per_dataset))
 
 
