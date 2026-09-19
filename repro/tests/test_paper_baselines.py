@@ -58,6 +58,8 @@ def test_piano_training_has_finite_losses_and_updates():
     torch.manual_seed(2)
     model = PianoQNet(g,[0,1,2,3],dim=4,rounds=2)
     _,stats = train_piano(model,lambda s,v: [1,.7,.3,.1][v],episodes=3,budget=2,
-        device='cpu',batch_size=2,n_step=2,seed=2)
+        device='cpu',batch_size=2,n_step=2,seed=2,exploration_steps=6,lr_decay_interval=2)
     assert stats['updates'] > 0
     assert np.isfinite(stats['episode_returns']).all()
+    assert abs(stats['final_epsilon']-.05) < 1e-12
+    assert abs(stats['final_learning_rate']-.001*.95**(stats['updates']//2)) < 1e-12

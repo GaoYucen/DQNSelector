@@ -8,7 +8,6 @@ the published equations. The experiment records all adapter choices.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 import time
 
 import numpy as np
@@ -78,9 +77,10 @@ def piano_select(model, k, device='cpu'):
     return order
 
 
-def train_piano(model, reward_fn, episodes=100, budget=50, seed=2024, device='cuda',
+def train_piano(model, reward_fn, episodes=200, budget=50, seed=2024, device='cuda',
                 learning_rate=.001, gamma=.95, n_step=5, batch_size=64,
-                target_update=100, replay_capacity=10000, progress=None):
+                target_update=100, replay_capacity=10000, progress=None,
+                exploration_steps=10000, lr_decay_interval=1000):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     model = model.to(device)
@@ -97,9 +97,10 @@ def train_piano(model, reward_fn, episodes=100, budget=50, seed=2024, device='cu
         selected = set()
         mask = np.zeros(model.n_nodes, dtype=bool)
         total = 0.
-        epsilon = max(.05, 1. - .95 * episode / max(1, int(.8 * episodes)))
         model.train()
         for t in range(budget):
+            elapsed_steps = episode * budget + t
+            epsilon = max(.05, 1. - .95 * elapsed_steps / max(1, exploration_steps-1))
             if rng.random() < epsilon:
                 a = int(rng.choice(pool[~mask[pool]]))
             else:
@@ -136,10 +137,15 @@ def train_piano(model, reward_fn, episodes=100, budget=50, seed=2024, device='cu
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 10.)
                 optimizer.step()
                 updates += 1
+                if lr_decay_interval and updates % lr_decay_interval == 0:
+                    for group in optimizer.param_groups:
+                        group['lr'] *= .95
                 if updates % target_update == 0:
                     target.load_state_dict(model.state_dict())
         trace.append(total)
         if progress is not None and ((episode + 1) % 10 == 0 or episode == 0):
             progress(episode + 1, total, time.perf_counter() - start)
     return model, dict(episode_returns=trace,updates=updates,transitions=episodes*budget,
-                       training_seconds=time.perf_counter()-start,seed=seed)
+                       training_seconds=time.perf_counter()-start,seed=seed,
+                       exploration_steps=exploration_steps,final_epsilon=epsilon,
+                       lr_decay_interval=lr_decay_interval,final_learning_rate=optimizer.param_groups[0]['lr'])

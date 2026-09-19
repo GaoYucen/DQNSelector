@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -77,6 +78,35 @@ def sync(device):
         torch.cuda.synchronize()
 
 
+def reuse_dqn(source, destination, config, variant, seed):
+    """Reuse completed training only after verifying inputs and unchanged DQN code."""
+    source=Path(source)
+    old=json.loads((source/'config.json').read_text())
+    for key in ['instance_sha256','embedding_sha256','train_mc','validation_mc','validation_seed','budgets']:
+        if old[key]!=config[key]:
+            raise ValueError(f'incompatible reusable DQN inputs: {key}')
+    if seed not in old['seeds'] or variant not in old['dqn_variants']:
+        return
+    run=source/f'dqn-{variant}-seed{seed}'
+    if not (run/'metrics.json').exists():
+        return
+    for name in ['selector.py','multibudget.py','rainbow.py','fusion.py','oracle.py']:
+        relative='repro/src/dqnselector/'+name
+        previous=subprocess.check_output(['git','show',old['git_head']+':'+relative],cwd=ROOT)
+        if previous!=(ROOT/relative).read_bytes():
+            raise ValueError(f'DQN implementation changed: {relative}')
+    previous=subprocess.check_output(['git','show',old['git_head']+':repro/scripts/sigir_experiment.py'],cwd=ROOT,text=True)
+    def training_block(script):
+        return script.split('\n                def callback(episode,model,total):',1)[1].split('            metrics=json.loads',1)[0]
+    if training_block(previous)!=training_block(Path(__file__).read_text()):
+        raise ValueError('DQN training or checkpoint-selection configuration changed')
+    for name in ['model.pt','metrics.json','progress.json']:
+        shutil.copy2(run/name,destination/name)
+    save_json(destination/'reuse-provenance.json',dict(source=str(run),source_commit=old['git_head'],
+        checkpoint_sha256=sha256(run/'model.pt'),verified_inputs_and_dqn_code=True))
+    print('REUSED_DQN',variant,seed,run,flush=True)
+
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--dataset',choices=['gowalla','brightkite'],required=True)
@@ -84,7 +114,8 @@ def main():
     p.add_argument('--phase',choices=['prepare','run'],default='run')
     p.add_argument('--seeds',type=int,nargs='+',default=[2024,2025,2026])
     p.add_argument('--dqn-variants',nargs='+',default=['paper-horizon','multi-budget'])
-    p.add_argument('--piano-episodes',type=int,default=100)
+    p.add_argument('--piano-episodes',type=int,default=200)
+    p.add_argument('--reuse-dqn-from')
     p.add_argument('--evaluation-mc',type=int,default=1000)
     p.add_argument('--device',default='cuda')
     p.add_argument('--threads',type=int,default=4)
@@ -168,6 +199,8 @@ def main():
                 raise ValueError('unknown DQN variant')
             run=out/f'dqn-{variant}-seed{seed}'
             run.mkdir(exist_ok=True)
+            if a.reuse_dqn_from and not (run/'metrics.json').exists():
+                reuse_dqn(a.reuse_dqn_from,run,config,variant,seed)
             torch.manual_seed(seed)
             np.random.seed(seed)
             model=RainbowSelector(emb['social_s'],emb['coverage_r'],worker_pool=pool)
@@ -217,7 +250,7 @@ def main():
             piano_best=[-np.inf,0]
             piano_trace=[]
             def reward(selected,v):
-                return float(training.activation_probability(set(selected)|{v}).sum()-training.activation_probability(selected).sum())/a.users
+                return float(training.activation_probability(set(selected)|{v}).sum()-training.activation_probability(selected).sum())
             def progress(ep,total,seconds):
                 order=piano_select(piano,100,a.device)
                 score=float(np.mean([validation.score(order[:k]) for k in BUDGETS]))

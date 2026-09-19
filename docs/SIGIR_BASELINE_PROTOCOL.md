@@ -50,25 +50,25 @@ processed instances or equality with the conference's absolute EC numbers.
    (residual-graph all-one features, singleton rather than marginal reward, and
    repeated RNG reseeding); prefer the published equations. Defaults:64 dimensions,
    4 message rounds, gamma=.95, n-step=5, batch=64, learning rate=.001. Use Adam as
-   in the public implementation. Influence reward is divided by n for numerical
-   scale, a positive constant that preserves the optimization target. Restrict
+   in the public implementation. Use the raw marginal influence-spread reward. Restrict
    selectable workers to U. Report as "PIANO (paper reimplementation)".
 
-   First-run training adapters must also be disclosed: use the complete fixed
-   3000-node instance instead of sampled training subgraphs; 100 episodes at k=50
-   (5000 transitions), with epsilon declining from 1 to .05 over the first 80
-   episodes and a fixed learning rate. The PIANO paper describes annealing over
-   10000 steps and learning-rate decay. Consequently this first run is a bounded
-   reproduction pilot, not a claim of reproducing PIANO's complete published
-   training regime or establishing its best achievable performance. A final
-   journal comparison needs the longer PIANO schedule and convergence checks.
+   Training adapters must also be disclosed: use the complete fixed 3000-node
+   instance instead of sampled training subgraphs; 200 episodes at k=50 (10000
+   transitions), with epsilon declining from 1 to .05 over 10000 steps. Decay the
+   learning rate by .95 every 1000 optimizer updates; the decay interval is an
+   explicit implementation choice because it is unspecified in the paper. The
+   initial 5000-step normalized-reward pilot was replaced before PIANO training.
+   This is a paper-equation reproduction with stated adapters, not a claim of
+   recovering the unavailable original SIGIR implementation.
 
 ## DQNSelector training
 
 Retain the v3 gated dual embedding and Rainbow architecture. Set the random seed
 before model initialization (the earlier CLI only seeded inside the trainer).
-Run the paper-horizon setting (100 episodes at k=50), and a separately named
-multi-budget setting (200 episodes balanced over 50..100). Checkpoints are selected
+The first complete table uses the paper-horizon setting (100 episodes at k=50).
+A separately named multi-budget setting (200 episodes balanced over 50..100) is
+available for follow-up if needed. Checkpoints are selected
 on independent validation worlds, never on final evaluation. Further variants,
 if needed, must have distinct configuration files and labels; do not relabel
 imitation or greedy hybrids as the unmodified DQNSelector.
