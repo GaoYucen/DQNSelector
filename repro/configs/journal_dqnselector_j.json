@@ -1,0 +1,21 @@
+{
+  "name": "DQNSelector-J",
+  "checkpoint_version": "dqnselector-j-v1",
+  "budgets": [50, 60, 70, 80, 90, 100],
+  "scenarios": {
+    "graph_sampling": ["uniform_induced", "community_bfs"],
+    "trivalency_values": [[0.001, 0.01, 0.1], [0.01, 0.05, 0.1]],
+    "quality_mode": ["uniform", "activity_reliability"],
+    "load_factor": [1.5, 2.0],
+    "target_sampling": "active_uniform",
+    "worker_pool_policy": "nonisolated_uniform"
+  },
+  "dqnselector_j": {
+    "footprint": "p*q/d + PIIC(range=2)",
+    "area_token": ["candidate_contribution", "residual_demand", "new_coverage", "overlap"],
+    "area_pooling": "shared MLP mean+max",
+    "training": {"episodes": 400, "pretrain_epochs": 20, "hidden_search": [128, 256], "ranking_weight_search": [0.1, 0.3], "ranking_temperature_search": [0.05, 0.1]}
+  },
+  "evaluation": {"train_mc": 100, "selection_mc": 300, "validation_mc": 500, "final_mc": 2000, "selection_timing_repeats": 30},
+  "acceptance": {"minimum_relative_gain": 0.05, "minimum_budgets": 4, "comparison": "strongest non-CELF baseline per instance and budget", "confidence_interval": "simultaneous paired bootstrap"}
+}
