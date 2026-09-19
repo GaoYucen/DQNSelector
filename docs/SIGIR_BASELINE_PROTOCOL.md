@@ -54,6 +54,15 @@ processed instances or equality with the conference's absolute EC numbers.
    scale, a positive constant that preserves the optimization target. Restrict
    selectable workers to U. Report as "PIANO (paper reimplementation)".
 
+   First-run training adapters must also be disclosed: use the complete fixed
+   3000-node instance instead of sampled training subgraphs; 100 episodes at k=50
+   (5000 transitions), with epsilon declining from 1 to .05 over the first 80
+   episodes and a fixed learning rate. The PIANO paper describes annealing over
+   10000 steps and learning-rate decay. Consequently this first run is a bounded
+   reproduction pilot, not a claim of reproducing PIANO's complete published
+   training regime or establishing its best achievable performance. A final
+   journal comparison needs the longer PIANO schedule and convergence checks.
+
 ## DQNSelector training
 
 Retain the v3 gated dual embedding and Rainbow architecture. Set the random seed
