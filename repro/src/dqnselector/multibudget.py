@@ -51,6 +51,7 @@ def train_rainbow_selector_multibudget(
     target_update_interval: int = 100,
     random_seed: int = 0,
     device: str | torch.device = "cpu",
+    episode_callback: Callable | None = None,
 ) -> tuple[RainbowSelector, MultiBudgetTrainStats]:
     """Train one selector over a balanced mixture of deployment budgets.
 
@@ -144,6 +145,8 @@ def train_rainbow_selector_multibudget(
 
         episode_returns.append(total_reward)
         selected_sets.append(sorted(selected))
+        if episode_callback is not None:
+            episode_callback(len(episode_returns), model, total_reward)
 
     return model, MultiBudgetTrainStats(
         episode_returns=episode_returns,
